@@ -1,0 +1,27 @@
+{
+"productName": "SuperTxt",
+"version": "1.0.0",
+"identifier": "com.supertxt.app",
+"build": {
+"beforeDevCommand": "npm run dev",
+"beforeBuildCommand": "npm run build",
+"devUrl": "http://localhost:1421",
+"frontendDist": "../dist"
+},
+"app": {
+"withGlobalTauri": true,
+"windows": [
+{
+"title": "SuperTxt",
+"width": 1100,
+"height": 750,
+"minWidth": 800,
+"minHeight": 600,
+"center": true
+}
+],
+"security": {
+"csp": null
+}
+}
+}

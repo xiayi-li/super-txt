@@ -1,0 +1,14 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* 屏蔽浏览器默认的轮廓线，让界面更像原生应用 */
+*:focus {
+outline: none;
+}
+
+body {
+margin: 0;
+padding: 0;
+overflow: hidden; /* 防止整个窗口出现滚动条 */
+}
