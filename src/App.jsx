@@ -118,28 +118,105 @@ const stripMarkdown = (text) => (text||'').replace(/```[\s\S]*?```/g,'').replace
 
 const htmlToMarkdown = (html) => {
   if (!html) return '';
-  let md = String(html).replace(/<br\s*[\/]?>/gi, '\n').replace(/<\/div>\s*<div.*?>/gi, '\n').replace(/<div.*?>/gi, '\n').replace(/<\/div>/gi, '');
-  md = md.replace(/<p.*?>/gi, '').replace(/<\/p>/gi, '\n');
-  // 颜色 span 保留
-  md = md.replace(/<span\s+style\s*=\s*"color:\s*(.*?)"[^>]*>(.*?)<\/span>/gi, '<span style="color:$1">$2</span>');
-  md = md.replace(/<font\s+color="(.*?)"[^>]*>(.*?)<\/font>/gi, '<span style="color:$1">$2</span>');
-  md = md.replace(/<strong.*?>(.*?)<\/strong>/gi, '**$1**').replace(/<b.*?>(.*?)<\/b>/gi, '**$1**').replace(/<em.*?>(.*?)<\/em>/gi, '*$1*').replace(/<i.*?>(.*?)<\/i>/gi, '*$1*');
-  md = md.replace(/<h1.*?>(.*?)<\/h1>/gi, '# $1\n').replace(/<h2.*?>(.*?)<\/h2>/gi, '## $1\n').replace(/<h3.*?>(.*?)<\/h3>/gi, '### $1\n');
-  md = md.replace(/<ul.*?>/gi, '').replace(/<\/ul>/gi, '');
-  // Checkbox patterns (various formats from different browsers)
-  md = md.replace(/<li[^>]*>\s*<input[^>]*checked[^>]*>\s*(.*?)<\/li>/gi, '- [x] $1\n');
-  md = md.replace(/<li[^>]*>\s*<input[^>]*type="checkbox"[^>]*>\s*(.*?)<\/li>/gi, '- [ ] $1\n');
-  md = md.replace(/<li.*?>(.*?)<\/li>/gi, '- $1\n');
-  md = md.replace(/<blockquote.*?>([\s\S]*?)<\/blockquote>/gi, (m, inner) => inner.split('\n').map(l => `> ${l.trim()}`).join('\n') + '\n');
-  md = md.replace(/<span class="wiki-link"[^>]*data-title="(.*?)"[^>]*>.*?<\/span>/gi, '[[$1]]');
-  md = md.replace(/<img.*?data-path="(.*?)".*?alt="(.*?)".*?data-width="(.*?)".*?>/gi, '![$2|$3]($1)').replace(/<img.*?data-path="(.*?)".*?alt="(.*?)".*?>/gi, '![$2]($1)');
-  md = md.replace(/<pre.*?><code>([\s\S]*?)<\/code><\/pre>/gi, '```\n$1\n```\n');
-  return md.replace(/<[^>]+(?!\/span)>/g, '').replace(/&nbsp;/g, ' ').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/\n{3,}/g, '\n\n').trim();
+
+  // ——— DOM 预处理：用真实 DOM property 检测 checkbox 状态 ———
+  // innerHTML 序列化只反映 HTML attribute（checked），不反映用户点击后的 property（.checked）
+  // 必须通过 DOM API 读取真实状态，转为安全占位符（不含 null 字节/HTML特殊字符）
+  const cbItems = []; // 存储 {checked, text} 数组
+  let source = html;
+  if (typeof document !== 'undefined') {
+    try {
+      const tmp = document.createElement('div');
+      tmp.innerHTML = html;
+      tmp.querySelectorAll('li').forEach(li => {
+        const cb = li.querySelector('input[type="checkbox"]');
+        if (!cb) return;
+        const isChecked = cb.checked; // 真实当前状态（property）
+        cb.remove();
+        const text = li.textContent.trim();
+        const idx = cbItems.length;
+        cbItems.push({ checked: isChecked, text });
+        // 用索引占位符替换整个 li（避免 null 字节在 HTML 序列化中被损坏）
+        const span = document.createElement('span');
+        span.dataset.cbidx = String(idx);
+        li.replaceWith(span);
+      });
+      source = tmp.innerHTML;
+    } catch (e) { /* 降级到正则处理 */ }
+  }
+
+  let md = String(source);
+  // 先将 <br> 替换为 \n
+  md = md.replace(/<br\s*[\/]?>/gi, '\n');
+  // div/p 换行
+  md = md.replace(/<\/div>\s*<div[^>]*>/gi, '\n').replace(/<div[^>]*>/gi, '\n').replace(/<\/div>/gi, '');
+  md = md.replace(/<p[^>]*>/gi, '').replace(/<\/p>/gi, '\n');
+  // 颜色 span 保留（先匹配，后续不被 strip 掉）
+  md = md.replace(/<span\s+style\s*=\s*["']color:\s*(.*?)["'][^>]*>(.*?)<\/span>/gi, '§COLOR§$1§§$2§END§');
+  md = md.replace(/<font\s+color=["'](.*?)["'][^>]*>([\s\S]*?)<\/font>/gi, '§COLOR§$1§§$2§END§');
+  md = md.replace(/<font\s+color=([\w#]+)[^>]*>([\s\S]*?)<\/font>/gi, '§COLOR§$1§§$2§END§');
+  // 提取 DOM 预处理生成的 checkbox 索引占位符 span
+  md = md.replace(/<span\s+data-cbidx="(\d+)"[^>]*><\/span>/gi, (_, idxStr) => {
+    const idx = parseInt(idxStr, 10);
+    const item = cbItems[idx];
+    if (!item) return '';
+    return '\n- [' + (item.checked ? 'x' : ' ') + '] ' + item.text + '\n';
+  });
+  md = md.replace(/<strong[^>]*>(.*?)<\/strong>/gi, '**$1**').replace(/<b[^>]*>(.*?)<\/b>/gi, '**$1**');
+  md = md.replace(/<em[^>]*>(.*?)<\/em>/gi, '*$1*').replace(/<i[^>]*>(.*?)<\/i>/gi, '*$1*');
+  md = md.replace(/<h1[^>]*>(.*?)<\/h1>/gi, '\n# $1\n').replace(/<h2[^>]*>(.*?)<\/h2>/gi, '\n## $1\n').replace(/<h3[^>]*>(.*?)<\/h3>/gi, '\n### $1\n');
+  // 相邻标题之间不要有空行
+  md = md.replace(/^(#{1,6} .+)\n\n+(#{1,6} )/gm, '$1\n$2');
+  // 列表：先处理 <ul><ol>，去除列表标签及其前后空白
+  md = md.replace(/<\/?ul[^>]*>/gi, '').replace(/<\/?ol[^>]*>/gi, '');
+  // 去掉 <li> 前的多余换行，避免产生空行
+  md = md.replace(/\n+(<li)/gi, '\n$1');
+  // 正则兜底（DOM 预处理未覆盖的情况）
+  md = md.replace(/<li[^>]*>\s*<input[^>]*checked[^>]*>\s*([\s\S]*?)<\/li>/gi, (m, p1) => '- [x] ' + p1.replace(/\n/g,'').trim() + '\n');
+  md = md.replace(/<li[^>]*>\s*<input[^>]*type="checkbox"[^>]*>\s*([\s\S]*?)<\/li>/gi, (m, p1) => '- [ ] ' + p1.replace(/\n/g,'').trim() + '\n');
+  md = md.replace(/<li[^>]*>([\s\S]*?)<\/li>/gi, (m, p1) => '- ' + p1.replace(/\n/g,'').trim() + '\n');
+  md = md.replace(/<blockquote[^>]*>([\s\S]*?)<\/blockquote>/gi, (m, inner) =>
+    inner.replace(/<[^>]+>/g,'').split('\n').filter(l=>l.trim()).map(l => `> ${l.trim()}`).join('\n') + '\n');
+  md = md.replace(/<span[^>]*class="wiki-link"[^>]*data-title="(.*?)"[^>]*>.*?<\/span>/gi, '[[$1]]');
+  md = md.replace(/<img[^>]*data-path="(.*?)"[^>]*alt="(.*?)"[^>]*data-width="(.*?)"[^>]*>/gi, '![$2|$3]($1)');
+  md = md.replace(/<img[^>]*data-path="(.*?)"[^>]*alt="(.*?)"[^>]*>/gi, '![$2]($1)');
+  md = md.replace(/<pre[^>]*><code>([\s\S]*?)<\/code><\/pre>/gi, '```\n$1\n```\n');
+  // 先把颜色占位符转换为最终的 HTML span（需保护，不能被后续 strip 掉）
+  // 用索引占位符，等 strip 之后再还原
+  const colorSpans = [];
+  md = md.replace(/§COLOR§(.*?)§§(.*?)§END§/g, (_, color, text) => {
+    const idx = colorSpans.length;
+    colorSpans.push(`<span style="color:${color}">${text}</span>`);
+    return `\x00COLOR${idx}\x00`;
+  });
+  // 去除所有剩余 HTML 标签
+  md = md.replace(/<[^>]+>/g, '');
+  // 还原 HTML 实体
+  md = md.replace(/&nbsp;/g, ' ').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+  // 最后还原颜色 span
+  colorSpans.forEach((span, idx) => { md = md.split(`\x00COLOR${idx}\x00`).join(span); });
+  // 去除列表项之间多余的空行（连续 - 开头的行之间不应有空行）
+  md = md.replace(/^([-*] .*)\n\n+([-*] )/gm, '$1\n$2');
+  md = md.replace(/^(- \[[ x]\] .*)\n\n+(- \[[ x]\] )/gm, '$1\n$2');
+  // 最多保留一个空行
+  md = md.replace(/\n{3,}/g, '\n\n');
+  return md.trim();
+};
+
+// 在序列化前将 checkbox 的 DOM property（.checked）同步到 HTML attribute
+// 因为用户点击 checkbox 只改 property，不改 attribute，innerHTML 只反映 attribute
+const syncCheckboxesAndMarkdown = (el) => {
+  if (!el) return '';
+  el.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+    if (cb.checked) cb.setAttribute('checked', '');
+    else cb.removeAttribute('checked');
+  });
+  return htmlToMarkdown(el.innerHTML);
 };
 
 const renderMarkdown = (rawText) => {
   let text = String(rawText || '');
-  if (!text) return '<span class="text-gray-400 italic">空空如也... 开始记录吧</span>';
+  if (!text) return '';
   text = text.replace(/</g, '&lt;').replace(/>/g, '&gt;');
   // 围栏代码块
   text = text.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) =>
@@ -152,7 +229,7 @@ const renderMarkdown = (rawText) => {
     .replace(/^# (.*$)/gim, '<h1 data-heading="$1" style="font-size:1.875rem;font-weight:800;margin:1.5rem 0 1rem;">$1</h1>');
   // 行内格式
   text = text.replace(/\*\*(.*?)\*\*/gim, '<strong>$1</strong>').replace(/\*(.*?)\*/gim, '<em>$1</em>');
-  text = text.replace(/&lt;span style=&quot;color:(.*?)&quot;&gt;(.*?)&lt;\/span&gt;/gim, '<span style="color:$1">$2</span>');
+  text = text.replace(/&lt;span style="color:(.*?)"&gt;(.*?)&lt;\/span&gt;/gim, '<span style="color:$1">$2</span>');
   text = text.replace(/`(.*?)`/gim, '<code style="background-color:#f3f4f6;padding:2px 6px;border-radius:4px;color:#db2777;">$1</code>');
   // 列表
   text = text.replace(/^- \[ \] (.*$)/gim, '<li style="list-style:none;"><input type="checkbox" style="margin-right:8px;"/> $1</li>')
@@ -161,6 +238,8 @@ const renderMarkdown = (rawText) => {
   text = text.replace(/^\d+\.\s(.*$)/gim, '<li style="margin-left:1.25rem;list-style-type:decimal;margin-top:0.25rem;margin-bottom:0.25rem;">$1</li>');
   // 引用
   text = text.replace(/^\&gt;\s(.*$)/gim, '<blockquote>$1</blockquote>');
+  // 合并相邻 blockquote
+  text = text.replace(/<\/blockquote>\n<blockquote>/g, '\n');
   // 表格 (简易)
   text = text.replace(/^\|(.+)\|\s*\n\|[-\s|:]+\|\s*\n((?:\|.+\|\s*\n?)*)/gm, (match, header, body) => {
     const ths = header.split('|').map(h => `<th style="border:1px solid #e5e7eb;padding:8px 12px;background:#f9fafb;">${h.trim()}</th>`).join('');
@@ -172,8 +251,10 @@ const renderMarkdown = (rawText) => {
   });
   // 双向链接 + 图片
   text = text.replace(/\[\[(.*?)\]\]/g, '<span class="wiki-link text-blue-600 dark:text-blue-400 font-medium cursor-pointer hover:underline" data-title="$1">[[$1]]</span>');
-  text = text.replace(/!\[(.*?)\|(\d+)\]\((.*?)\)/g, '<img src="$3" data-path="$3" alt="$1" data-width="$2" style="width:$2px;max-width:100%;border-radius:8px;border:1px solid #ddd;margin:12px 0;cursor:zoom-in;" class="previewable-img" onerror="window.loadLocalImage(this.getAttribute(\'data-path\'), this)"/>');
-  text = text.replace(/!\[(.*?)\]\((.*?)\)/g, '<img src="$2" data-path="$2" alt="$1" style="max-width:100%;border-radius:8px;border:1px solid #ddd;margin:12px 0;cursor:zoom-in;" class="previewable-img" onerror="window.loadLocalImage(this.getAttribute(\'data-path\'), this)"/>');
+  text = text.replace(/!\[(.*?)\|(\d+)\]\((.*?)\)/g, '<img src="$3" data-path="$3" alt="$1" data-width="$2" style="width:$2px;max-width:100%;border-radius:8px;border:1px solid #ddd;margin:12px 0;" class="previewable-img" onerror="window.loadLocalImage(this.getAttribute(\'data-path\'), this)"/>');
+  text = text.replace(/!\[(.*?)\]\((.*?)\)/g, '<img src="$2" data-path="$2" alt="$1" style="max-width:100%;border-radius:8px;border:1px solid #ddd;margin:12px 0;" class="previewable-img" onerror="window.loadLocalImage(this.getAttribute(\'data-path\'), this)"/>');
+  // 去掉列表项间的换行（不要转为 <br/>）
+  text = text.replace(/<\/li>\n/g, '</li>');
   text = text.replace(/\n/g, '<br/>');
   return text;
 };
@@ -208,6 +289,7 @@ function SuperTxtShell() {
   const [showColorPicker, setShowColorPicker] = useState(false);
   const [fullscreenImage, setFullscreenImage] = useState(null);
   const [showBacklinks, setShowBacklinks] = useState(false);
+  const [selectedImage, setSelectedImage] = useState(null);
 
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [tempWorkspacePath, setTempWorkspacePath] = useState(workspacePath);
@@ -218,7 +300,7 @@ function SuperTxtShell() {
 
   const [confirmDialog, setConfirmDialog] = useState(null);
   const [moveDialog, setMoveDialog] = useState(null);
-  const [saveStatus, setSaveStatus] = useState({ state: 'saved', time: new Date() });
+  const [saveStatus, setSaveStatus] = useState({ state: 'saved', time: null });
   const [upgradeModalOpen, setUpgradeModalOpen] = useState(false);
   const [pendingAction, setPendingAction] = useState(null);
 
@@ -226,8 +308,13 @@ function SuperTxtShell() {
   const [recentPage, setRecentPage] = useState(1);
   const ITEMS_PER_PAGE = 10;
 
+  // 正文字体大小: sm=13px, md=15px, lg=17px
+  const [editorFontSize, setEditorFontSize] = useState(() => { try { return localStorage.getItem('supertxt_fontsize') || 'md'; } catch { return 'md'; } });
+  const fontSizeMap = { sm: '13px', md: '15px', lg: '17px' };
+  useEffect(() => { try { localStorage.setItem('supertxt_fontsize', editorFontSize); } catch {} }, [editorFontSize]);
+
   // 工具栏激活态（视觉模式下根据 selection 查询）
-  const [activeFormats, setActiveFormats] = useState({ bold:false, italic:false, h1:false, h2:false, h3:false, list:false, quote:false });
+  const [activeFormats, setActiveFormats] = useState({ bold:false, italic:false, h1:false, h2:false, h3:false, list:false, quote:false, currentColor:'#111827' });
   // 一键折叠所有展开目录
   const expandedCount = useMemo(() => categories.filter(c=>c.expanded).length, [categories]);
 
@@ -235,6 +322,7 @@ function SuperTxtShell() {
   const newCatInputRef = useRef(null);
   const saveTimeoutId = useRef(null);
   const contentSyncId = useRef(null);
+  const savedSelectionRef = useRef(null);
 
   const activeNote = useMemo(() => notes.find(n => n.id === activeNoteId), [notes, activeNoteId]);
   const docHeadings = useMemo(() => {
@@ -269,9 +357,6 @@ function SuperTxtShell() {
       if (!target) return;
       setContextMenu(null);
       if (showColorPicker && !target.closest('.color-picker-container')) setShowColorPicker(false);
-      if (target.tagName === 'IMG' && target.classList && target.classList.contains('previewable-img')) {
-        setFullscreenImage(target.src);
-      }
       // 双向链接点击
       const wikiLink = target.closest('.wiki-link');
       if (wikiLink) {
@@ -318,7 +403,7 @@ function SuperTxtShell() {
               if (activeNoteId) {
                 if (showVisualMode && visualEditorRef.current && document.activeElement === visualEditorRef.current) {
                   document.execCommand('insertHTML', false, `<img src="${imgPath}" data-path="${imgPath}" alt="粘贴图片" style="max-width:100%;border-radius:8px;border:1px solid #ddd;margin:12px 0;cursor:zoom-in;" class="previewable-img" onerror="window.loadLocalImage(this.getAttribute('data-path'), this)"/>`);
-                  updateActiveNote({content: htmlToMarkdown(visualEditorRef.current.innerHTML)});
+                  updateActiveNote({content: syncCheckboxesAndMarkdown(visualEditorRef.current)});
                 } else {
                   const textarea = document.getElementById('note-editor-textarea');
                   if (textarea && document.activeElement === textarea) {
@@ -383,7 +468,6 @@ function SuperTxtShell() {
           : initialCategories;
         setCategories(safeCats); setNotes(safeNotes); setTags(parsedMeta.tags || []); setRecentIds(Array.isArray(parsedMeta.recentIds) ? parsedMeta.recentIds : []);
         console.log('[SuperTxt] 数据加载完成:', safeNotes.length, '条笔记,', safeCats.length, '个目录');
-        showToast("✅ 物理磁盘挂载成功");
       } catch (e) {
         console.warn('[SuperTxt] 索引加载失败(首次运行属正常):', e?.message || e);
         setCategories(initialCategories); setNotes([]); setTags(initialTags); setRecentIds([]);
@@ -424,18 +508,32 @@ function SuperTxtShell() {
 
   // 视觉模式：监听选区变化，实时更新工具栏激活态
   useEffect(() => {
-    if (!showVisualMode) { setActiveFormats({ bold:false, italic:false, h1:false, h2:false, h3:false, list:false, quote:false }); return; }
+    if (!showVisualMode) { setActiveFormats({ bold:false, italic:false, h1:false, h2:false, h3:false, list:false, quote:false, currentColor:'#111827' }); return; }
     const updateFormats = () => {
       try {
         const block = document.queryCommandValue('formatBlock') || '';
+        const fc = document.queryCommandValue('foreColor') || '';
+        // 检查是否是 checkbox 待办列表（区别于普通无序列表）
+        let isList = document.queryCommandState('insertUnorderedList');
+        if (isList) {
+          const sel = window.getSelection();
+          let node = sel?.anchorNode;
+          while (node && node !== visualEditorRef.current) {
+            if (node.nodeType === 1 && node.tagName === 'LI' && node.querySelector && node.querySelector('input[type="checkbox"]')) {
+              isList = false; break;
+            }
+            node = node.parentNode;
+          }
+        }
         setActiveFormats({
           bold: document.queryCommandState('bold'),
           italic: document.queryCommandState('italic'),
           h1: /h1/i.test(block),
           h2: /h2/i.test(block),
           h3: /h3/i.test(block),
-          list: document.queryCommandState('insertUnorderedList'),
+          list: isList,
           quote: /blockquote/i.test(block),
+          currentColor: fc || '#111827',
         });
       } catch {}
     };
@@ -489,16 +587,20 @@ function SuperTxtShell() {
       const isDup = notes.some(n => n.categoryId === currentNote.categoryId && n.id !== activeNoteId && n.title === updates.title);
       if (isDup) { showToast("⚠️ 同名文件拦截", true); return; }
     }
+    // 检查是否有实际变化，无变化则不触发保存
+    const hasContentChange = (updates.content !== undefined && updates.content !== currentNote.content);
+    const hasTitleChange = (updates.title !== undefined && updates.title !== currentNote.title);
+    const hasFormatChange = (updates.format !== undefined && updates.format !== currentNote.format);
+    if (!hasContentChange && !hasTitleChange && !hasFormatChange && Object.keys(updates).every(k => ['content','title','format'].includes(k))) return;
     setNotes(notes.map(n => {
       if (n.id === activeNoteId) {
         let updatedNote = { ...n, ...updates, updatedAt: new Date().toISOString() };
-        if ((updates.title !== undefined && updates.title !== n.title) || (updates.format !== undefined && updates.format !== n.format)) {
+        if (hasTitleChange || hasFormatChange) {
           const oldPath = generatePath(n.categoryId, n.title, n.format, categories, workspacePath);
           const newPath = generatePath(n.categoryId, updatedNote.title, updatedNote.format, categories, workspacePath);
           if(isTauri) invoke('rename_local_item', { oldPath, newPath }).catch(()=>{});
         }
-        if (updates.content !== undefined || updates.title !== undefined || updates.format !== undefined) {
-          setSaveStatus({ state: 'saving', time: null });
+        if (hasContentChange || hasTitleChange || hasFormatChange) {
           if(saveTimeoutId.current) clearTimeout(saveTimeoutId.current);
           saveTimeoutId.current = setTimeout(async () => {
             if (!isTauri) { setSaveStatus({ state: 'saved', time: new Date() }); return; }
@@ -523,13 +625,17 @@ function SuperTxtShell() {
       setOpenTabs(Array.from(new Set(newTabs)));
     }
     setActiveNoteId(id);
+    // md 格式默认进入视觉模式
+    const targetNote = notes.find(n => n.id === id);
+    if (targetNote && targetNote.format === 'md') setShowVisualMode(true);
     // 最近访问：追加到末尾（不移到第一个，避免列表跳动），仅在不存在时添加
     setRecentIds(prev => { if (prev.includes(id)) return prev; return [id, ...prev].slice(0, 100); });
     // 写入访问时间（不触发 saveStatus 变化）
     setNotes(prev => prev.map(n => n.id === id ? { ...n, lastAccessedAt: new Date().toISOString() } : n));
-    // 自动展开该笔记所在的父目录链
+    // 自动展开该笔记所在的父目录链 + 选中该目录
     const note = notes.find(n => n.id === id);
     if (note && note.categoryId) {
+      setActiveCategoryId(note.categoryId);
       const idsToExpand = new Set();
       let cur = note.categoryId;
       while (cur) {
@@ -622,7 +728,6 @@ function SuperTxtShell() {
     const insertedCore = selection || defaultText;
     const newText = text.substring(0, start) + prefix + insertedCore + suffix + text.substring(end);
     if (upgradeToMd) {
-      if (isTauri) { const oldPath = generatePath(activeNote.categoryId, activeNote.title, 'txt', categories, workspacePath); invoke('rename_local_item', { oldPath, newPath: oldPath + '.old' }).catch(()=>{}); }
       updateActiveNote({ format: 'md', content: newText });
     } else {
       updateActiveNote({ content: newText });
@@ -636,8 +741,17 @@ function SuperTxtShell() {
   const executeUpgradeToMd = () => {
     const action = pendingAction;
     setUpgradeModalOpen(false); setPendingAction(null);
-    if (action) insertSourceFormat(action, true);
-    else updateActiveNote({ format: 'md' });
+    if (action && action !== 'color') {
+      insertSourceFormat(action, true);
+    } else {
+      // 纯格式升级（含 color 动作：升级后用户在视觉模式下选颜色即可）
+      updateActiveNote({ format: 'md' });
+    }
+    // 转换完成后自动进入视觉模式
+    setTimeout(() => {
+      if (visualEditorRef.current) visualEditorRef.current.removeAttribute('data-note-id');
+      setShowVisualMode(true);
+    }, 80);
   };
 
   const handleToolbarAction = (action, extraValue = null) => {
@@ -657,26 +771,28 @@ function SuperTxtShell() {
         }
       } catch {}
       switch(action) {
-        case 'bold': document.execCommand('bold', false, null); break;
-        case 'italic': document.execCommand('italic', false, null); break;
+        case 'bold': {
+          document.execCommand('bold', false, null);
+          break;
+        }
+        case 'italic': {
+          document.execCommand('italic', false, null);
+          break;
+        }
         case 'underline': document.execCommand('underline', false, null); break;
         case 'color':
           if (extraValue) {
             const sel = window.getSelection();
             if (!sel || sel.isCollapsed) {
-              document.execCommand('insertHTML', false, `<span style="color:${extraValue}">彩色文本</span>`);
+              // 无选区：设置输入颜色持续生效
+              document.execCommand('foreColor', false, extraValue);
             } else {
-              // 用 insertHTML 而非 foreColor，确保兼容 htmlToMarkdown
+              // 有选区：着色后光标移到末尾，重置为黑色
+              document.execCommand('foreColor', false, extraValue);
               const range = sel.getRangeAt(0);
-              const fragment = range.extractContents();
-              const wrapper = document.createElement('span');
-              wrapper.style.color = extraValue;
-              wrapper.appendChild(fragment);
-              range.insertNode(wrapper);
-              sel.removeAllRanges();
-              const newRange = document.createRange();
-              newRange.selectNodeContents(wrapper);
-              sel.addRange(newRange);
+              range.collapse(false);
+              sel.removeAllRanges(); sel.addRange(range);
+              document.execCommand('foreColor', false, '#111827');
             }
           }
           break;
@@ -686,7 +802,7 @@ function SuperTxtShell() {
         case 'heading': document.execCommand('formatBlock', false, 'H3'); break;
         case 'list': document.execCommand('insertUnorderedList', false, null); break;
         case 'quote': document.execCommand('formatBlock', false, 'BLOCKQUOTE'); break;
-        case 'todo': document.execCommand('insertHTML', false, '<ul><li style="list-style:none;"><input type="checkbox" style="margin-right:8px;"/> 待办事项</li></ul><br/>'); break;
+        case 'todo': document.execCommand('insertHTML', false, '<ul><li style="list-style:none;"><input type="checkbox" style="margin-right:8px;"/> 待办事项</li></ul>'); break;
         case 'todoTemplate': {
           const now = new Date();
           const pad = n=>n.toString().padStart(2,'0');
@@ -709,7 +825,7 @@ function SuperTxtShell() {
       if (contentSyncId.current) clearTimeout(contentSyncId.current);
       contentSyncId.current = setTimeout(() => {
         if (visualEditorRef.current) {
-          updateActiveNote({ content: htmlToMarkdown(visualEditorRef.current.innerHTML) });
+          updateActiveNote({ content: syncCheckboxesAndMarkdown(visualEditorRef.current) });
         }
       }, 600);
       return;
@@ -722,21 +838,61 @@ function SuperTxtShell() {
 
   const toggleVisualMode = (toVisual) => {
     if (!activeNoteId) return;
-    if (!toVisual && visualEditorRef.current) updateActiveNote({ content: htmlToMarkdown(visualEditorRef.current.innerHTML) });
+    if (!toVisual && visualEditorRef.current) {
+      // 保存当前可视内容为 markdown
+      updateActiveNote({ content: syncCheckboxesAndMarkdown(visualEditorRef.current) });
+    }
+    if (toVisual && visualEditorRef.current) {
+      // 强制清除 data-note-id，确保切换回视觉时重新渲染最新 markdown
+      visualEditorRef.current.removeAttribute('data-note-id');
+    }
     setShowVisualMode(toVisual);
   };
 
   const handleScreenshot = async () => {
     if (!isTauri) { showToast("⚠️ 仅 Tauri 桌面端支持截图", true); return; }
     try {
-      await invoke('start_screenshot');
-      showToast("📸 截图工具已唤起，完成后按 Ctrl+V 粘贴");
-    } catch (e) { showToast("❌ 截图唤起失败: " + (e?.message||e), true); }
+      showToast("📸 截图完成后将自动粘贴...");
+      invoke('start_screenshot').catch(e => showToast("❌ 截图失败: " + (e?.message||e), true));
+      // 窗口重新获焦后自动读取剪贴板图片粘贴
+      const onFocus = async () => {
+        window.removeEventListener('focus', onFocus);
+        try {
+          if (!navigator.clipboard?.read) return;
+          const items = await navigator.clipboard.read();
+          for (const item of items) {
+            const imgType = item.types.find(t => t.startsWith('image/'));
+            if (!imgType) continue;
+            const blob = await item.getType(imgType);
+            const buffer = await blob.arrayBuffer();
+            const bytes = Array.from(new Uint8Array(buffer));
+            const fileName = `img_${Date.now()}.png`;
+            const imgPath = `${workspacePath}\\.assets\\${fileName}`;
+            await invoke('save_raw_file', { path: imgPath, bytes });
+            const altText = '截图';
+            if (showVisualMode && visualEditorRef.current) {
+              visualEditorRef.current.focus();
+              document.execCommand('insertHTML', false, `<img src="${imgPath}" data-path="${imgPath}" alt="${altText}" style="max-width:100%;border-radius:8px;border:1px solid #ddd;margin:12px 0;" class="previewable-img" onerror="window.loadLocalImage(this.getAttribute('data-path'), this)"/>`);
+              updateActiveNote({content: syncCheckboxesAndMarkdown(visualEditorRef.current)});
+            } else {
+              const textarea = document.getElementById('note-editor-textarea');
+              const mdImage = `\n![${altText}](${imgPath})\n`;
+              if (textarea) { const s = textarea.selectionStart; updateActiveNote({content: textarea.value.substring(0, s) + mdImage + textarea.value.substring(textarea.selectionEnd)}); }
+              else if (activeNoteId) setNotes(prev => prev.map(n => n.id === activeNoteId ? {...n, content: n.content + mdImage, updatedAt: new Date().toISOString()} : n));
+            }
+            showToast("✅ 截图已自动插入");
+            return;
+          }
+        } catch (e) { console.log('[screenshot] auto-paste failed', e); }
+      };
+      window.addEventListener('focus', onFocus);
+    } catch (e) { showToast("❌ 截图唤起失败", true); }
   };
 
   const handleExtractPlainText = () => {
     if (!activeNote) return;
-    setTempTextContent(showVisualMode && visualEditorRef.current ? visualEditorRef.current.innerText : stripMarkdown(activeNote.content));
+    const raw = showVisualMode && visualEditorRef.current ? visualEditorRef.current.innerText : stripMarkdown(activeNote.content);
+    setTempTextContent(raw.replace(/\n{3,}/g, '\n\n').trim());
     setShowTempTextModal(true);
   };
 
@@ -767,13 +923,19 @@ function SuperTxtShell() {
 
   const handleTOCClick = (headingText) => {
     if (showVisualMode && visualEditorRef.current) {
-      const el = visualEditorRef.current.querySelector(`[data-heading="${headingText}"]`);
-      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      // 遍历所有标题元素，按文本内容匹配
+      const headings = visualEditorRef.current.querySelectorAll('h1,h2,h3,h4,h5,h6');
+      for (const el of headings) {
+        if (el.textContent.trim() === headingText) {
+          el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          break;
+        }
+      }
     } else {
       const textarea = document.getElementById('note-editor-textarea');
       if (textarea) {
         const idx = textarea.value.indexOf(headingText);
-        if (idx !== -1) { textarea.focus(); textarea.setSelectionRange(idx, idx + headingText.length); }
+        if (idx !== -1) { textarea.focus(); textarea.setSelectionRange(idx, idx + headingText.length); textarea.scrollTop = textarea.scrollHeight * (idx / textarea.value.length); }
       }
     }
   };
@@ -813,26 +975,35 @@ function SuperTxtShell() {
           const count = getCategoryNoteCount(cat.id);
           const isSelected = activeCategoryId === cat.id;
           const isAncestor = ancestorCategoryIds.has(cat.id);
-          let FolderIcon = <Folder size={14} className="text-gray-400 opacity-50 shrink-0" />;
-          if (isRootFolder) FolderIcon = <Folder size={14} className="text-blue-500 shrink-0" fill="currentColor" fillOpacity={0.2}/>;
-          else if (hasDirectFiles) FolderIcon = <Folder size={14} className="text-emerald-500 shrink-0" fill="currentColor" fillOpacity={0.2}/>;
-          else if (hasSubDirs) FolderIcon = <Folder size={14} className="text-amber-500 shrink-0" fill="currentColor" fillOpacity={0.2}/>;
+          // 图标颜色：统一逻辑（根目录与子目录一致）
+          const iconColor = hasDirectFiles ? 'text-emerald-500' : hasSubDirs ? 'text-amber-500' : 'text-gray-400';
+          // 选中高亮颜色
+          const selectedBg = hasDirectFiles ? 'bg-emerald-500' : hasSubDirs ? 'bg-amber-500' : 'bg-blue-500';
           return (
-            <li key={cat.id}>
-              <div className={`group flex items-center px-1.5 py-1.5 rounded-lg cursor-pointer text-sm transition-all border-l-[3px] ${isSelected ? 'bg-gradient-to-r from-blue-50 to-blue-100/60 dark:from-blue-900/40 dark:to-blue-800/20 text-blue-700 dark:text-blue-200 font-semibold border-l-blue-500 shadow-[0_1px_4px_rgba(59,130,246,0.15)]' : isAncestor ? 'bg-blue-50/30 dark:bg-blue-900/10 text-blue-600 dark:text-blue-300 border-l-blue-300/60' : 'text-gray-700 dark:text-gray-300 border-l-transparent hover:bg-gray-100 dark:hover:bg-gray-800/50'}`}
-                style={{ paddingLeft: `${level * 16 + 8}px` }}
+            <li key={cat.id} className="relative">
+              <div className={`group flex items-center py-1.5 rounded-lg cursor-pointer text-sm transition-all ${isSelected ? `${selectedBg} text-white font-semibold shadow-md` : isAncestor ? `bg-blue-50/80 dark:bg-blue-900/20 text-blue-700 dark:text-blue-200 font-medium` : 'text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800/50'}`}
+                style={{ paddingLeft: `${level * 16 + 8}px`, paddingRight: '8px' }}
                 onClick={() => { setActiveCategoryId(cat.id); }}
-                onContextMenu={(e) => { e.preventDefault(); setContextMenu({ visible:true, x:e.clientX, y:e.clientY, type:'folder', item: cat}); }}>
+                onContextMenu={(e) => { e.preventDefault(); setContextMenu({ visible:true, x:e.clientX, y:e.clientY, type:'folder', item: cat}); }}
+                onDragOver={(e) => { e.preventDefault(); e.currentTarget.classList.add('ring-2','ring-blue-400'); }}
+                onDragLeave={(e) => { e.currentTarget.classList.remove('ring-2','ring-blue-400'); }}
+                onDrop={(e) => { e.preventDefault(); e.currentTarget.classList.remove('ring-2','ring-blue-400'); const noteId = e.dataTransfer.getData('text/note-id'); if (noteId) { const dragNote = notes.find(n=>n.id===noteId); if(dragNote && dragNote.categoryId !== cat.id) { if(isTauri) { const oldPath = generatePath(dragNote.categoryId, dragNote.title, dragNote.format, categories, workspacePath); const newPath = generatePath(cat.id, dragNote.title, dragNote.format, categories, workspacePath); invoke('rename_local_item',{oldPath,newPath}).catch(()=>{}); } setNotes(prev => prev.map(n => n.id === noteId ? { ...n, categoryId: cat.id } : n)); showToast("✅ 已移入 " + cat.name); } } }}>
                 <div className="w-5 h-5 flex items-center justify-center shrink-0 text-gray-400 hover:text-gray-600 rounded" onClick={(e) => {e.stopPropagation(); if(hasChildren) { setCategories(categories.map(c => c.id === cat.id ? { ...c, expanded: !c.expanded } : c)); } setActiveCategoryId(cat.id);}}>
                   {hasChildren ? (cat.expanded ? <ChevronDown size={14}/> : <ChevronRight size={14}/>) : <div className="w-1.5 h-1.5 rounded-full bg-gray-300"></div>}
                 </div>
-                {/* 加号前置，常显但低调；hover 时变亮 */}
-                <button onClick={(e) => { e.stopPropagation(); setCreatingCategory(cat.id); }} className="p-0.5 mr-0.5 rounded text-gray-300 hover:text-blue-600 hover:bg-blue-50 opacity-60 group-hover:opacity-100 transition-opacity" title="新建子目录"><Plus size={11}/></button>
-                <div className="w-5 flex items-center justify-center shrink-0">{FolderIcon}</div>
+                <div className={`w-5 flex items-center justify-center shrink-0 ${isSelected ? 'text-white' : iconColor}`}>
+                  {isRootFolder ? <FolderOpen size={14} fill="currentColor" fillOpacity={0.25}/> : <Folder size={14} fill="currentColor" fillOpacity={0.25}/>}
+                </div>
                 <span className="flex-1 truncate leading-none">{cat.name}</span>
-                {/* 数量始终显示（不再被加号覆盖） */}
-                <span className="text-[10px] text-gray-400 ml-1 font-mono bg-gray-200/50 dark:bg-gray-700 px-1.5 rounded-full shrink-0">{count}</span>
+                <span className={`text-[10px] ml-1 font-mono px-1.5 rounded-full shrink-0 ${isSelected ? 'bg-white/25 text-white' : 'bg-gray-200/60 dark:bg-gray-700 text-gray-400'}`}>{count}</span>
+                <button onClick={(e) => { e.stopPropagation(); setCreatingCategory(cat.id); }} className={`p-0.5 ml-1 rounded opacity-0 group-hover:opacity-100 transition-opacity ${isSelected?'text-white/70 hover:text-white hover:bg-white/20':'text-gray-300 hover:text-blue-600 hover:bg-blue-50'}`} title="新建子目录"><Plus size={11}/></button>
               </div>
+              {/* 新建子目录输入框：显示在该目录下面 */}
+              {creatingCategory === cat.id && (
+                <div className="flex items-center py-1.5" style={{ paddingLeft: `${(level+1) * 16 + 16}px` }}>
+                  <input autoFocus value={newCategoryName} onChange={e=>setNewCategoryName(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')handleCreateCategory(creatingCategory);if(e.key==='Escape')setCreatingCategory(false);}} onBlur={()=>handleCreateCategory(creatingCategory)} placeholder="目录名称" className="flex-1 text-sm bg-white dark:bg-gray-700 border rounded px-2 py-1 outline-none focus:border-blue-400"/>
+                </div>
+              )}
               {cat.expanded && renderCategoryTree(cat.id, level + 1)}
             </li>
           );
@@ -884,6 +1055,10 @@ function SuperTxtShell() {
               <button onClick={() => {setMoveDialog({type:'folder',item:contextMenu.item,targetId:'root'});setContextMenu(null);}} className="w-full text-left px-4 py-2 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center"><CornerRightUp size={14} className="mr-2 text-green-500"/>移动该目录</button>
               <div className="h-px bg-gray-200 dark:bg-gray-700 my-1"></div>
               <button onClick={() => {handleDeleteCategory(contextMenu.item);setContextMenu(null);}} className="w-full text-left px-4 py-2 hover:bg-red-50 text-red-600 flex items-center"><Trash2 size={14} className="mr-2"/>删除目录</button>
+            </>) : contextMenu.type === 'tab' ? (<>
+              <button onClick={() => {handleCloseTab(null,contextMenu.item.id);setContextMenu(null);}} className="w-full text-left px-4 py-2 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center"><X size={14} className="mr-2 text-gray-500"/>关闭</button>
+              <button onClick={() => {const others=openTabs.filter(t=>t!==contextMenu.item.id);setOpenTabs([contextMenu.item.id]);setActiveNoteId(contextMenu.item.id);setContextMenu(null);}} className="w-full text-left px-4 py-2 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center"><X size={14} className="mr-2 text-orange-500"/>关闭其它</button>
+              <button onClick={() => {setOpenTabs([]);setActiveNoteId(null);setContextMenu(null);}} className="w-full text-left px-4 py-2 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center"><X size={14} className="mr-2 text-red-500"/>关闭全部</button>
             </>) : (<>
               <button onClick={() => {setMoveDialog({type:'note',item:contextMenu.item,targetId:'root'});setContextMenu(null);}} className="w-full text-left px-4 py-2 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center"><CornerRightUp size={14} className="mr-2 text-green-500"/>移动笔记</button>
               <button onClick={() => {handleOpenNote(contextMenu.item.id); handleConvertToTxtPermanent(); setContextMenu(null);}} className="w-full text-left px-4 py-2 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center"><ArrowRightLeft size={14} className="mr-2 text-purple-500"/>格式转换</button>
@@ -1003,7 +1178,11 @@ function SuperTxtShell() {
           </button>
         </div>
         <div className="flex-1 overflow-y-auto min-h-0 px-2 py-2 space-y-4 custom-scrollbar pb-16">
-          <div onClick={()=>setActiveCategoryId(null)} className={`flex items-center px-3 py-2 rounded-lg cursor-pointer text-sm font-medium transition-colors ${activeCategoryId===null?'bg-blue-600 text-white':'text-gray-700 dark:text-gray-300 hover:bg-gray-200/60 dark:hover:bg-gray-700'}`}>
+          <div onClick={()=>setActiveCategoryId(null)}
+            onDragOver={(e)=>{e.preventDefault();e.currentTarget.classList.add('ring-2','ring-blue-400');}}
+            onDragLeave={(e)=>{e.currentTarget.classList.remove('ring-2','ring-blue-400');}}
+            onDrop={(e)=>{e.preventDefault();e.currentTarget.classList.remove('ring-2','ring-blue-400'); const noteId=e.dataTransfer.getData('text/note-id'); if(noteId){ const dragNote=notes.find(n=>n.id===noteId); if(dragNote && dragNote.categoryId !== null) { if(isTauri) { const oldPath=generatePath(dragNote.categoryId,dragNote.title,dragNote.format,categories,workspacePath); const newPath=generatePath(null,dragNote.title,dragNote.format,categories,workspacePath); invoke('rename_local_item',{oldPath,newPath}).catch(()=>{}); } setNotes(prev=>prev.map(n=>n.id===noteId?{...n,categoryId:null}:n));showToast("✅ 已移至根目录"); } }}}
+            className={`flex items-center px-3 py-2 rounded-lg cursor-pointer text-sm font-medium transition-colors ${activeCategoryId===null?'bg-blue-600 text-white':'text-gray-700 dark:text-gray-300 hover:bg-gray-200/60 dark:hover:bg-gray-700'}`}>
             <Library size={16} className="mr-2.5"/>全部文件
             <span className={`ml-auto text-[10px] px-1.5 rounded-full font-mono ${activeCategoryId===null?'bg-white/20 text-white':'bg-gray-200/60 text-gray-500'}`}>{notes.length}</span>
           </div>
@@ -1021,9 +1200,10 @@ function SuperTxtShell() {
               </div>
             </div>
             {renderCategoryTree(null, 0)}
-            {creatingCategory && (
+            {/* 新建顶层目录输入框 */}
+            {creatingCategory === 'root' && (
               <div className="flex items-center px-3 py-1.5 mt-1">
-                <input autoFocus value={newCategoryName} onChange={e=>setNewCategoryName(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')handleCreateCategory(creatingCategory);if(e.key==='Escape')setCreatingCategory(false);}} onBlur={()=>handleCreateCategory(creatingCategory)} placeholder="目录名称" className="flex-1 text-sm bg-white dark:bg-gray-700 border rounded px-2 py-1 outline-none"/>
+                <input autoFocus value={newCategoryName} onChange={e=>setNewCategoryName(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')handleCreateCategory(creatingCategory);if(e.key==='Escape')setCreatingCategory(false);}} onBlur={()=>handleCreateCategory(creatingCategory)} placeholder="目录名称" className="flex-1 text-sm bg-white dark:bg-gray-700 border rounded px-2 py-1 outline-none focus:border-blue-400"/>
               </div>
             )}
           </div>
@@ -1048,7 +1228,7 @@ function SuperTxtShell() {
           {filteredNotes.map(note => {
             const preview = stripMarkdown(note.content).substring(0,80);
             return (
-            <div key={note.id} onClick={()=>handleOpenNote(note.id)} onContextMenu={(e)=>{e.preventDefault();setContextMenu({visible:true,x:e.clientX,y:e.clientY,type:'note',item:note})}}
+            <div key={note.id} draggable onDragStart={(e)=>{e.dataTransfer.setData('text/note-id', note.id); e.dataTransfer.effectAllowed='move'; e.currentTarget.style.opacity='0.5';}} onDragEnd={(e)=>{e.currentTarget.style.opacity='1';}} onClick={()=>handleOpenNote(note.id)} onContextMenu={(e)=>{e.preventDefault();setContextMenu({visible:true,x:e.clientX,y:e.clientY,type:'note',item:note})}}
               className={`p-3 border-b dark:border-gray-700 cursor-pointer ${activeNoteId===note.id?'bg-blue-50/50 dark:bg-blue-900/20 border-l-[3px] border-l-blue-500':'hover:bg-gray-50 dark:hover:bg-gray-800 border-l-[3px] border-l-transparent'}`}>
               <div className="flex items-center justify-between mb-1">
                 <h3 className="font-medium text-[13px] truncate flex-1" dangerouslySetInnerHTML={{__html: highlightText(note.title||'未命名笔记', searchQuery)}}/>
@@ -1077,40 +1257,102 @@ function SuperTxtShell() {
           <div className={`flex items-center border-b overflow-x-auto select-none pt-2 px-2 gap-1 custom-scrollbar shrink-0 relative ${theme==='dark'?'bg-gray-900 border-gray-700':'bg-[#f4f5f7] border-gray-200'}`}>
             {Array.from(new Set(openTabs)).map(tabId => {
               const tabNote = notes.find(n=>n.id===tabId); if(!tabNote) return null;
-              return (<div key={tabId} onClick={()=>setActiveNoteId(tabId)} className={`flex items-center px-3 py-1.5 rounded-t-lg border cursor-pointer min-w-[120px] max-w-[200px] group transition-all ${tabId===activeNoteId?`bg-white dark:bg-gray-800 text-blue-600 relative top-[1px] ${theme==='dark'?'border-gray-700':'border-gray-200'}`:'bg-transparent text-gray-500 border-transparent'}`}>
+              return (<div key={tabId} onClick={()=>setActiveNoteId(tabId)}
+                onContextMenu={(e)=>{e.preventDefault(); setContextMenu({visible:true, x:e.clientX, y:e.clientY, type:'tab', item:{id:tabId}});}}
+                className={`flex items-center px-3 py-1.5 rounded-t-lg border cursor-pointer min-w-[120px] max-w-[200px] group transition-all ${tabId===activeNoteId?`bg-white dark:bg-gray-800 text-blue-600 relative top-[1px] ${theme==='dark'?'border-gray-700':'border-gray-200'}`:'bg-transparent text-gray-500 border-transparent'}`}>
                 <span className="truncate flex-1 text-[11px] font-medium">{tabNote.title}</span><button onClick={(e)=>handleCloseTab(e,tabId)} className="ml-2 p-0.5 opacity-50 hover:opacity-100"><X size={12}/></button>
               </div>);
             })}
-            {openTabs.length >= 2 && (
-              <button onClick={()=>{setOpenTabs([]);setActiveNoteId(null);}} className="ml-auto shrink-0 text-[10px] text-gray-400 hover:text-red-500 px-2 py-1 rounded whitespace-nowrap">全部关闭</button>
-            )}
           </div>
         )}
         {/* 编辑器 */}
         {activeNote ? (<>
-          <div className={`h-12 border-b px-6 flex items-center justify-between shrink-0 z-10 ${theme==='dark'?'bg-[#0f0f0f] border-gray-700':'bg-white border-gray-200'}`}>
-            <div className="flex items-center space-x-3">
+          <div className={`border-b px-4 flex flex-wrap items-center gap-2 py-2 shrink-0 z-10 ${theme==='dark'?'bg-[#0f0f0f] border-gray-700':'bg-white border-gray-200'}`}>
+            <div className="flex items-center space-x-2 flex-wrap">
               {activeNote.format==='md' ? (
-                <div className="flex items-center bg-gray-100 dark:bg-gray-800 rounded-md p-0.5 mr-2 shrink-0">
-                  <button onClick={()=>toggleVisualMode(false)} className={`px-3 py-1 rounded text-[11px] flex items-center ${!showVisualMode?'bg-white dark:bg-gray-700 shadow-sm':''}`}><Code size={12} className="mr-1"/> 源码</button>
-                  <button onClick={()=>toggleVisualMode(true)} className={`px-3 py-1 rounded text-[11px] flex items-center ${showVisualMode?'bg-white dark:bg-gray-700 shadow-sm text-blue-600':''}`}><Eye size={12} className="mr-1"/> 视觉</button>
+                <div className="flex items-center bg-gray-100 dark:bg-gray-800 rounded-md p-0.5 shrink-0">
+                  <button onClick={()=>toggleVisualMode(false)} className={`px-2.5 py-1 rounded text-[11px] flex items-center ${!showVisualMode?'bg-white dark:bg-gray-700 shadow-sm':''}`}><Code size={12} className="mr-1"/> 源码</button>
+                  <button onClick={()=>toggleVisualMode(true)} className={`px-2.5 py-1 rounded text-[11px] flex items-center ${showVisualMode?'bg-white dark:bg-gray-700 shadow-sm text-blue-600':''}`}><Eye size={12} className="mr-1"/> 视觉</button>
                 </div>
               ) : (
-                <div className="flex items-center bg-gray-100 dark:bg-gray-800 px-3 py-1 rounded-md text-[11px] text-gray-500 mr-2 shrink-0"><FileText size={12} className="mr-1.5"/> TXT 纯净模式</div>
+                <div className="flex items-center bg-gray-100 dark:bg-gray-800 px-2.5 py-1 rounded-md text-[11px] text-gray-500 shrink-0"><FileText size={12} className="mr-1.5"/> TXT</div>
               )}
-              <div className="w-px h-4 bg-gray-200 dark:bg-gray-700 mx-1 shrink-0"></div>
-              <div className="flex items-center space-x-0.5 overflow-x-auto hide-scrollbar">
+              <div className="w-px h-4 bg-gray-200 dark:bg-gray-700 shrink-0"></div>
+              <div className="flex items-center flex-wrap gap-0.5">
                 <button onMouseDown={(e)=>e.preventDefault()} onClick={()=>handleToolbarAction('bold')} className={`toolbar-btn p-1.5 rounded transition-all active:scale-90 ${activeFormats.bold?'bg-blue-100 text-blue-600 dark:bg-blue-900/40':'text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700'}`} title="加粗 (Ctrl+B)"><Bold size={14}/></button>
                 <button onMouseDown={(e)=>e.preventDefault()} onClick={()=>handleToolbarAction('italic')} className={`toolbar-btn p-1.5 rounded transition-all active:scale-90 ${activeFormats.italic?'bg-blue-100 text-blue-600 dark:bg-blue-900/40':'text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700'}`} title="斜体 (Ctrl+I)"><Italic size={14}/></button>
                 <button onMouseDown={(e)=>e.preventDefault()} onClick={()=>handleToolbarAction('quote')} className={`toolbar-btn p-1.5 rounded transition-all active:scale-90 ${activeFormats.quote?'bg-blue-100 text-blue-600 dark:bg-blue-900/40':'text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700'}`} title="引用块"><Quote size={14}/></button>
-                {showVisualMode && (
-                  <div className="relative color-picker-container">
-                    <button onMouseDown={(e)=>e.preventDefault()} onClick={()=>setShowColorPicker(!showColorPicker)} className="toolbar-btn p-1.5 text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700 rounded transition-all active:scale-90" title="字体颜色"><Palette size={14}/></button>
-                    {showColorPicker && (<div className="absolute top-full mt-1 left-0 bg-white dark:bg-gray-800 shadow-xl border rounded p-2 flex gap-1 z-50" onMouseDown={(e)=>e.preventDefault()}>
-                      {['#ef4444','#3b82f6','#10b981','#f59e0b','#8b5cf6','#111827'].map(c => <div key={c} onMouseDown={(e)=>e.preventDefault()} onClick={()=>{handleToolbarAction('color',c);setShowColorPicker(false);}} className="w-5 h-5 rounded cursor-pointer border hover:scale-110 transition-transform" style={{background:c}} title={c}></div>)}
-                    </div>)}
+                <div className="relative color-picker-container">
+                    <button onMouseDown={(e)=>e.preventDefault()} onClick={()=>{
+                      // TXT 格式：直接触发升级流程
+                      if (activeNote.format === 'txt') { handleToolbarAction('color'); return; }
+                      // 打开颜色选择器前保存当前 selection
+                      if (visualEditorRef.current) {
+                        const sel = window.getSelection();
+                        savedSelectionRef.current = (sel && sel.rangeCount > 0) ? sel.getRangeAt(0).cloneRange() : null;
+                      }
+                      setShowColorPicker(v=>!v);
+                    }} className="toolbar-btn p-1.5 text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700 rounded transition-all active:scale-90 relative" title="字体颜色">
+                      <Palette size={14}/>
+                      <div className="absolute bottom-0.5 left-1/2 -translate-x-1/2 w-3 h-[2px] rounded-full" style={{background: activeFormats.currentColor || '#111827'}}></div>
+                    </button>
+                    {showColorPicker && (
+                      <div className="absolute top-full mt-1 left-0 bg-white dark:bg-gray-800 shadow-xl border rounded-lg p-2 z-50 w-[180px]">
+                        <div className="grid grid-cols-5 gap-1.5 mb-2">
+                          {['#ef4444','#f97316','#f59e0b','#10b981','#06b6d4','#3b82f6','#6366f1','#8b5cf6','#ec4899','#111827'].map(c => (
+                            <div key={c} className="w-6 h-6 rounded-md cursor-pointer border border-gray-200 dark:border-gray-600 hover:scale-110 transition-transform flex items-center justify-center" style={{background:c}} title={c}
+                              onMouseDown={(e) => {
+                                e.preventDefault(); e.stopPropagation();
+                                try {
+                                  if (!visualEditorRef.current) return;
+                                  visualEditorRef.current.focus();
+                                  const sel = window.getSelection();
+                                  if (savedSelectionRef.current) {
+                                    sel.removeAllRanges();
+                                    sel.addRange(savedSelectionRef.current);
+                                  }
+                                  if (sel && !sel.isCollapsed) {
+                                    // 选中文字：着色后光标移到末尾，后续输入恢复黑色
+                                    document.execCommand('foreColor', false, c);
+                                    const range = sel.getRangeAt(0);
+                                    range.collapse(false);
+                                    sel.removeAllRanges(); sel.addRange(range);
+                                    // 重置后续输入颜色为黑色
+                                    document.execCommand('foreColor', false, '#111827');
+                                  } else {
+                                    // 无选区：设置输入颜色，持续生效
+                                    document.execCommand('foreColor', false, c);
+                                  }
+                                  if (contentSyncId.current) clearTimeout(contentSyncId.current);
+                                  contentSyncId.current = setTimeout(() => {
+                                    if (visualEditorRef.current) updateActiveNote({content: syncCheckboxesAndMarkdown(visualEditorRef.current)});
+                                  }, 400);
+                                } catch(err) { console.error('color err', err); }
+                                setShowColorPicker(false);
+                              }}>
+                              {c === '#111827' && <span className="text-white text-[8px] font-bold">A</span>}
+                            </div>
+                          ))}
+                        </div>
+                        <button onMouseDown={(e) => {
+                          e.preventDefault(); e.stopPropagation();
+                          try {
+                            if (!visualEditorRef.current) return;
+                            visualEditorRef.current.focus();
+                            const sel = window.getSelection();
+                            if (savedSelectionRef.current) { sel.removeAllRanges(); sel.addRange(savedSelectionRef.current); }
+                            if (sel && !sel.isCollapsed) {
+                              document.execCommand('removeFormat', false, null);
+                              document.execCommand('foreColor', false, '#111827');
+                            }
+                            if (contentSyncId.current) clearTimeout(contentSyncId.current);
+                            contentSyncId.current = setTimeout(() => { if (visualEditorRef.current) updateActiveNote({content: syncCheckboxesAndMarkdown(visualEditorRef.current)}); }, 400);
+                          } catch {}
+                          setShowColorPicker(false);
+                        }} className="w-full text-[11px] text-gray-500 hover:text-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700 rounded py-1 transition-colors">恢复默认黑色</button>
+                      </div>
+                    )}
                   </div>
-                )}
                 <div className="w-px h-3 bg-gray-200 dark:bg-gray-700 mx-1"></div>
                 <button onMouseDown={(e)=>e.preventDefault()} onClick={()=>handleToolbarAction('h1')} className={`toolbar-btn p-1.5 font-bold text-[12px] rounded transition-all active:scale-90 ${activeFormats.h1?'bg-blue-100 text-blue-600 dark:bg-blue-900/40':'text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700'}`} title="一级标题">H1</button>
                 <button onMouseDown={(e)=>e.preventDefault()} onClick={()=>handleToolbarAction('h2')} className={`toolbar-btn p-1.5 font-bold text-[12px] rounded transition-all active:scale-90 ${activeFormats.h2?'bg-blue-100 text-blue-600 dark:bg-blue-900/40':'text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700'}`} title="二级标题">H2</button>
@@ -1118,14 +1360,17 @@ function SuperTxtShell() {
                 <div className="w-px h-3 bg-gray-200 dark:bg-gray-700 mx-1"></div>
                 <button onMouseDown={(e)=>e.preventDefault()} onClick={()=>handleToolbarAction('list')} className={`toolbar-btn p-1.5 rounded transition-all active:scale-90 ${activeFormats.list?'bg-blue-100 text-blue-600 dark:bg-blue-900/40':'text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700'}`} title="无序列表"><List size={14}/></button>
                 <button onMouseDown={(e)=>e.preventDefault()} onClick={()=>handleToolbarAction('todo')} className="toolbar-btn p-1.5 text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700 rounded transition-all active:scale-90" title="插入待办"><ListChecks size={14}/></button>
-                <button onMouseDown={(e)=>e.preventDefault()} onClick={()=>handleToolbarAction('todoTemplate')} className="toolbar-btn p-1.5 text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700 rounded transition-all active:scale-90" title="快捷待办 (日期+时间+任务模板)"><CalendarDays size={14}/></button>
-                <button onMouseDown={(e)=>e.preventDefault()} onClick={()=>handleToolbarAction('timestamp')} className="toolbar-btn p-1.5 text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700 rounded transition-all active:scale-90" title="插入当前日期时间"><Clock size={14}/></button>
-                {activeNote.format==='md' && <button onMouseDown={(e)=>e.preventDefault()} onClick={handleScreenshot} className="toolbar-btn p-1.5 text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/30 rounded transition-all active:scale-90" title="截图插入 (调用系统截图)"><Camera size={14}/></button>}
+                <button onMouseDown={(e)=>e.preventDefault()} onClick={()=>handleToolbarAction('todoTemplate')} className="toolbar-btn p-1.5 text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700 rounded transition-all active:scale-90" title="快捷待办"><CalendarDays size={14}/></button>
+                <button onMouseDown={(e)=>e.preventDefault()} onClick={()=>handleToolbarAction('timestamp')} className="toolbar-btn p-1.5 text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700 rounded transition-all active:scale-90" title="时间戳"><Clock size={14}/></button>
+                {activeNote.format==='md' && <button onMouseDown={(e)=>e.preventDefault()} onClick={handleScreenshot} className="toolbar-btn p-1.5 text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/30 rounded transition-all active:scale-90" title="截图"><Camera size={14}/></button>}
               </div>
             </div>
-            <div className="flex items-center space-x-1.5 shrink-0">
-              <button onClick={()=>setZenMode(!zenMode)} className="p-1.5 text-gray-500 hover:text-blue-600 rounded" title="沉浸模式 (隐藏侧栏)">{zenMode?<Minimize size={14}/>:<Maximize size={14}/>}</button>
-              <button onClick={handleExtractPlainText} className="p-1.5 text-gray-500 hover:text-blue-600 rounded" title="提取纯文本导出"><FileOutput size={14}/></button>
+            <div className="flex items-center space-x-1.5 ml-auto shrink-0">
+              <div className="flex items-center bg-gray-100 dark:bg-gray-800 rounded-md p-0.5 text-[11px] shrink-0">
+                {['sm','md','lg'].map(s => <button key={s} onMouseDown={e=>e.preventDefault()} onClick={()=>setEditorFontSize(s)} className={`px-1.5 py-0.5 rounded transition-all ${editorFontSize===s?'bg-white dark:bg-gray-700 shadow-sm text-blue-600':'text-gray-400 hover:text-gray-600'}`} title={{sm:'小字',md:'中字',lg:'大字'}[s]}>{s.toUpperCase()}</button>)}
+              </div>
+              <button onClick={()=>setZenMode(!zenMode)} className="p-1.5 text-gray-500 hover:text-blue-600 rounded" title="沉浸模式">{zenMode?<Minimize size={14}/>:<Maximize size={14}/>}</button>
+              <button onClick={handleExtractPlainText} className="p-1.5 text-gray-500 hover:text-blue-600 rounded" title="提取纯文本"><FileOutput size={14}/></button>
             </div>
           </div>
           {/* 编辑器主体 */}
@@ -1133,15 +1378,14 @@ function SuperTxtShell() {
             <div className="flex-1 overflow-y-auto custom-scrollbar flex justify-center">
               <div className={`w-full max-w-4xl py-5 px-7 flex flex-col`}>
                 <input id="note-title-input" type="text" value={activeNote.title} onChange={(e)=>updateActiveNote({title:e.target.value})} placeholder="无标题笔记" className="text-2xl font-bold bg-transparent border-none outline-none mb-2 w-full dark:text-gray-100"/>
-                <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-gray-500 mb-4 font-mono">
-                  <span className={`font-bold ${saveStatus.state==='saving'?'text-gray-400 animate-pulse':'text-green-500'}`}>
-                    {saveStatus.state==='saving'?'保存中...': `已保存 ${saveStatus.time?formatDate(saveStatus.time.toISOString()):''}`}
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-gray-400 mb-3 font-mono">
+                  <span className="font-bold text-green-500 text-[11px]">
+                    {saveStatus.time ? `已保存 ${formatDate(saveStatus.time.toISOString())}` : '未保存'}
                   </span>
-                  <span className="text-gray-400">创建 {formatDate(activeNote.createdAt)}</span>
-                  <span className="text-gray-400">修改 {formatDate(activeNote.updatedAt)}</span>
-                  <span className="text-gray-400">访问 {formatDate(activeNote.lastAccessedAt||activeNote.updatedAt)}</span>
-                  <span className="text-gray-400 text-[10px] cursor-pointer hover:text-blue-500 hover:underline ml-auto inline-flex items-center" title="点击在资源管理器中定位该文件" onClick={()=>{if(isTauri) invoke('open_folder',{path: generatePath(activeNote.categoryId, activeNote.title, activeNote.format, categories, workspacePath)}).catch(()=>{})}}>
-                    <FolderOpen size={10} className="mr-1"/>{generatePath(activeNote.categoryId, activeNote.title, activeNote.format, categories, workspacePath)}
+                  <span>创建 {formatDate(activeNote.createdAt)}</span>
+                  <span>修改 {formatDate(activeNote.updatedAt)}</span>
+                  <span className="cursor-pointer hover:text-blue-500 hover:underline inline-flex items-center" title="点击定位文件" onClick={()=>{if(isTauri) invoke('open_folder',{path: generatePath(activeNote.categoryId, activeNote.title, activeNote.format, categories, workspacePath)}).catch(()=>{})}}>
+                    <FolderOpen size={9} className="mr-0.5"/>{(()=>{ const p=generatePath(activeNote.categoryId, activeNote.title, activeNote.format, categories, workspacePath); return p.length>50 ? '...'+p.slice(-45) : p; })()}
                   </span>
                 </div>
                 {showVisualMode && activeNote.format==='md' ? (
@@ -1159,16 +1403,73 @@ function SuperTxtShell() {
                       }
                     }
                   }}>
-                    <div ref={visualEditorRef} contentEditable suppressContentEditableWarning className="flex-1 w-full text-[15px] leading-relaxed outline-none pb-32 editor-content min-h-[400px] dark:text-gray-200" 
+                    <div ref={visualEditorRef} contentEditable suppressContentEditableWarning
+                      className="flex-1 w-full leading-relaxed outline-none editor-content dark:text-gray-200"
+                      style={{fontSize: fontSizeMap[editorFontSize], minHeight: '60vh', paddingBottom: '30vh'}}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && !e.shiftKey) {
+                          try {
+                            const block = (document.queryCommandValue('formatBlock') || '').toLowerCase();
+                            // 标题或引用 Enter → 插入段落并切为正文
+                            if (/^h[1-6]$/.test(block) || block === 'blockquote') {
+                              e.preventDefault();
+                              document.execCommand('insertParagraph', false, null);
+                              document.execCommand('formatBlock', false, 'p');
+                            }
+                          } catch {}
+                        }
+                      }}
                       onInput={(e)=>{
                         if(contentSyncId.current) clearTimeout(contentSyncId.current);
-                        const html = e.currentTarget.innerHTML;
-                        contentSyncId.current = setTimeout(()=>updateActiveNote({content: htmlToMarkdown(html)}), 800);
+                        const el = e.currentTarget;
+                        contentSyncId.current = setTimeout(()=>updateActiveNote({content: syncCheckboxesAndMarkdown(el)}), 800);
                       }}
-                      onBlur={(e)=>updateActiveNote({content:htmlToMarkdown(e.target.innerHTML)})}/>
+                      onMouseDown={(e) => {
+                        // 图片点击选中显示尺寸控件
+                        const target = e.target;
+                        if (target.tagName === 'IMG') {
+                          e.preventDefault();
+                          setSelectedImage(target);
+                        }
+                      }}
+                      onClick={(e) => {
+                        // 点击非图片区域取消图片选中
+                        if (e.target.tagName !== 'IMG') setSelectedImage(null);
+                        // checkbox 被点击 → 属性同步后立即保存
+                        if (e.target.type === 'checkbox') {
+                          if (contentSyncId.current) clearTimeout(contentSyncId.current);
+                          contentSyncId.current = setTimeout(() => {
+                            if (visualEditorRef.current) updateActiveNote({content: syncCheckboxesAndMarkdown(visualEditorRef.current)});
+                          }, 0);
+                        }
+                      }}
+                      onDoubleClick={(e) => {
+                        // 双击图片放大预览
+                        if (e.target.tagName === 'IMG') {
+                          e.preventDefault();
+                          setFullscreenImage(e.target.src);
+                        }
+                      }}
+                      onBlur={(e)=>updateActiveNote({content:syncCheckboxesAndMarkdown(e.target)})}/>
+                    {/* 图片尺寸修改浮层 */}
+                    {selectedImage && (() => {
+                      const rect = selectedImage.getBoundingClientRect();
+                      const containerRect = visualEditorRef.current?.parentElement?.getBoundingClientRect() || {top:0,left:0};
+                      return (
+                        <div className="fixed bg-white dark:bg-gray-800 shadow-2xl border border-gray-200 dark:border-gray-700 rounded-lg p-2.5 flex items-center gap-2 z-[100]" style={{ top: rect.bottom + 6, left: Math.max(8, rect.left) }}>
+                          <span className="text-[11px] text-gray-500 shrink-0">宽:</span>
+                          {[100, 200, 300, 450, 600].map(w => (
+                            <button key={w} onMouseDown={(e) => { e.preventDefault(); selectedImage.style.width = w + 'px'; selectedImage.setAttribute('data-width', w); setSelectedImage(null); if(contentSyncId.current) clearTimeout(contentSyncId.current); contentSyncId.current = setTimeout(()=>{if(visualEditorRef.current) updateActiveNote({content:syncCheckboxesAndMarkdown(visualEditorRef.current)});},300); }}
+                              className={`px-2 py-0.5 text-[11px] rounded transition-colors ${selectedImage.offsetWidth === w ? 'bg-blue-500 text-white' : 'bg-gray-100 dark:bg-gray-700 hover:bg-blue-100 hover:text-blue-600'}`}>{w}</button>
+                          ))}
+                          <input type="number" defaultValue={Math.round(selectedImage.offsetWidth)} min={50} max={1200} className="w-14 px-1.5 py-0.5 text-[11px] border rounded dark:bg-gray-700 dark:border-gray-600 outline-none text-center" onKeyDown={(e) => { if(e.key==='Enter') { const v = Math.max(50, parseInt(e.target.value)||300); selectedImage.style.width = v+'px'; selectedImage.setAttribute('data-width',v); setSelectedImage(null); if(contentSyncId.current) clearTimeout(contentSyncId.current); contentSyncId.current = setTimeout(()=>{if(visualEditorRef.current) updateActiveNote({content:syncCheckboxesAndMarkdown(visualEditorRef.current)});},300); }}} placeholder="px"/>
+                          <button onMouseDown={(e)=>{e.preventDefault();setSelectedImage(null)}} className="text-gray-400 hover:text-red-500 ml-1"><X size={13}/></button>
+                        </div>
+                      );
+                    })()}
                   </div>
                 ) : (
-                  <textarea id="note-editor-textarea" value={activeNote.content} onChange={(e)=>updateActiveNote({content:e.target.value})} className={`flex-1 w-full bg-transparent border-none outline-none resize-none leading-relaxed pb-32 min-h-[400px] dark:text-gray-200 ${activeNote.format==='md'?'text-[14px] font-mono':'text-[15px]'}`}/>
+                  <textarea id="note-editor-textarea" value={activeNote.content} onChange={(e)=>updateActiveNote({content:e.target.value})} style={{fontSize: activeNote.format==='md' ? '13px' : fontSizeMap[editorFontSize]}} className={`flex-1 w-full bg-transparent border-none outline-none resize-none leading-relaxed pb-32 min-h-[400px] dark:text-gray-200 ${activeNote.format==='md'?'font-mono':''}`}/>
                 )}
                 {/* 反向链接面板 */}
                 {backlinks.length > 0 && (
