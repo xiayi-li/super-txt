@@ -1,113 +1,117 @@
-# Tauri + React
+# SuperTxt
 
-This template should help get you started developing with Tauri and React in Vite.
+**AI 时代的 Windows 原生记事本终极形态** — 基于本地文件系统、极速秒开、支持 TXT 与 Markdown 智能双模的轻量级个人知识库工具。
 
-## Recommended IDE Setup
+![SuperTxt 界面](screenshot.png)
 
-- [VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
+## 特性
 
-super-txt/                  <-- 你的项目根目录
-│
-├── node_modules/           <-- 依赖包存放地 (不用管)
-├── public/                 <-- 静态资源 (不用管)
-│
-├── src/                    <-- 【前端 React 代码区】
-│   ├── assets/
-│   ├── App.css
-│   ├── App.jsx             <-- 👉 替换文件 3：[React 架构入口:src/App.jsx]
-│   │                           (把原有内容全删掉，粘贴我给你的 React 代码)
-│   └── main.jsx
-│
-├── src-tauri/              <-- 【后端 Rust 与系统配置区】
-│   ├── icons/
+- **三栏布局** — 侧边栏 / 文件列表 / 编辑器，支持拖拽调整宽度
+- **TXT / MD 双模** — TXT 纯净模式与 Markdown 富文本模式无缝切换，TXT 中使用排版功能时自动提示升级
+- **视觉编辑器** — 基于 contentEditable 的所见即所得 Markdown 编辑器，支持双向切换
+- **大纲导航** — H1-H6 标题自动提取，层级缩进，点击跳转
+- **全局截图** — 一键唤起系统截图工具（Win+Shift+S），图片自动存入 `.assets` 隐藏目录
+- **本地图片渲染** — 通过 Rust 读取二进制流绕过 WebView 本地路径限制，支持自定义宽度语法
+- **智能目录树** — 四色状态可视化（蓝=根目录 / 灰=空 / 橙=仅子目录 / 绿=含文件）
+- **全局搜索** — 标题与正文实时模糊检索
+- **多标签管理** — 浏览器级多标签体验，支持焦点回退与一键清理
+- **文本提纯** — 一键剥离 Markdown/HTML 标记，复制纯净文本给大模型
+- **双向链接** — `[[笔记名]]` 语法，自动创建/跳转，反向链接追踪
+- **暗黑模式** — 全局 Light/Dark 主题切换
+- **沉浸模式** — 一键隐藏侧边栏，全屏心流写作
+- **防白屏** — ErrorBoundary 错误边界，Toast 通知替代 alert，模态对话框
+
+## 技术栈
+
+| 层 | 技术 |
+|---|---|
+| 桌面底座 | Tauri v2 (WebView2 + Rust) |
+| 前端 | React 19 + TailwindCSS 3 |
+| 构建 | Vite 7 |
+| 图标 | lucide-react |
+| 打包 | NSIS |
+
+## 环境要求
+
+- [Node.js](https://nodejs.org/) >= 18
+- [Rust](https://www.rust-lang.org/tools/install) (stable)
+- [NSIS](https://nsis.sourceforge.io/) (安装到默认路径 `C:\Program Files (x86)\NSIS\`)
+
+## 开发
+
+```bash
+# 安装依赖
+npm install
+
+# 启动开发服务器
+npm run tauri dev
+```
+
+开发模式下会自动打开 DevTools 方便调试。
+
+## 打包构建
+
+### 轻量安装包（默认，~3MB）
+
+目标机器需已安装 WebView2（Win11 自带，Win10 通过 Windows Update 自动推送）：
+
+```powershell
+$env:Path = "C:\Program Files (x86)\NSIS\Bin;$env:Path"
+npm run tauri build -- --bundles nsis
+```
+
+### 离线安装包（~200MB，内网可用）
+
+自带 WebView2 完整运行时，无需联网：
+
+1. 修改 `src-tauri/tauri.conf.json` 中 `webviewInstallMode`：
+   ```json
+   "webviewInstallMode": { "type": "offlineInstaller" }
+   ```
+2. 执行构建命令（同上）
+3. 构建完成后改回 `"skip"`
+
+**输出路径：** `src-tauri/target/release/bundle/nsis/SuperTxt_1.0.0_x64-setup.exe`
+
+## 项目结构
+
+```
+super-txt/
+├── src/                        # 前端代码
+│   ├── App.jsx                 # 主应用组件（全部 UI 逻辑）
+│   ├── App.css                 # 应用样式
+│   ├── main.jsx                # React 入口
+│   ├── index.css               # 全局样式 + Tailwind 指令
+│   └── postcss.config.js       # PostCSS 配置
+├── src-tauri/                  # Rust 后端
 │   ├── src/
-│   │   └── main.rs         <-- 👉 替换文件 2：[Rust 底层引擎:src-tauri/src/main.rs]
-│   │                           (负责真正读写你电脑硬盘的 Rust 代码)
-│   ├── Cargo.toml
-│   └── tauri.conf.json     <-- 👉 替换文件 1：[Tauri 配置与权限:src-tauri/tauri.conf.json]
-│                               (定义窗口大小、名称、以及允许软件读写硬盘的权限)
-│
-├── index.html
-├── package.json
-└── vite.config.js
+│   │   ├── lib.rs              # IPC 命令实现（文件 IO、截图、扫描等）
+│   │   └── main.rs             # Rust 入口
+│   ├── tauri.conf.json         # Tauri 配置（窗口、权限、打包）
+│   ├── Cargo.toml              # Rust 依赖
+│   └── capabilities/           # Tauri 权限声明
+├── index.html                  # HTML 入口
+├── vite.config.js              # Vite 配置
+├── tailwind.config.js          # TailwindCSS 配置
+└── package.json                # Node 依赖与脚本
+```
 
+## Rust IPC 命令
 
-SuperTxt 产品技术设计说明书 (v1.0)
-1. 核心定位与设计哲学
-定位：AI 时代 Windows 原生记事本的“性能强化版”。
+| 命令 | 功能 |
+|---|---|
+| `read_local_file` | 读取文本文件 |
+| `save_local_file` | 写入文本文件 |
+| `read_raw_file` | 读取二进制文件（图片等） |
+| `save_raw_file` | 写入二进制文件 |
+| `rename_local_item` | 重命名/移动文件或目录 |
+| `create_local_dir` | 创建目录（自动递归） |
+| `delete_local_item` | 删除文件或目录 |
+| `list_dir` | 列举目录内容 |
+| `open_folder` | 在资源管理器中打开/定位 |
+| `start_screenshot` | 唤起系统截图工具 |
+| `scan_workspace` | 递归扫描工作区文件 |
 
-设计哲学 (Local-First)：文件即数据，数据即文件。软件仅作为物理文件夹的 UI 渲染层，用户在软件外使用其他编辑器（如 VS Code）修改文件，软件应保持高度兼容与一致性。
+## License
 
-极简心流：秒开、自动保存、格式随心（TXT/MD 无损升级）。
-
-2. 技术栈架构
-运行环境：Tauri (Rust 后端 + Webview 前端)
-
-前端框架：React 18 + TailwindCSS
-
-状态管理：React Hooks (useMemo, useCallback), Context API
-
-底层通信：Tauri IPC (Frontend -> Rust -> OS API)
-
-存储结构：
-
-物理层：真实文件夹与 .md / .txt 文件。
-
-索引层：supertxt_index.json (用于存储标签、置顶状态、目录折叠信息等非文件元数据)。
-
-3. 功能模块详细设计
-3.1 物理文件系统 (The Workspace)
-根目录锁定：支持用户自定义绝对路径。所有操作严格在此目录下进行。
-
-动态扫描：软件启动时递归扫描工作区，生成文件树。
-
-同名安全拦截：所有新建、重命名、移动操作，必须先通过 Rust 校验物理路径是否存在。若存在同名，强制弹出 UI 错误提示，禁止覆盖。
-
-文件操作联动：
-
-创建：调用 save_local_file，不存在父目录自动递归创建。
-
-删除：调用 delete_local_item，若目录非空（检测算法：目录下含有文件），禁止删除。
-
-移动：支持右键菜单 -> 移动。前端提供目录选择器（含路径预览），后端调用 rename_local_item 执行系统原子重命名。
-
-3.2 编辑器引擎 (The Engine)
-双模态切换：
-
-源码模式：支持 Markdown 语法，提供工具栏快捷输入。
-
-视觉模式：contentEditable 渲染。包含 “大纲导航(TOC)”，支持 H1-H3 标题自动提取。
-
-智能格式转换：
-
-无感升维：TXT 笔记中触发任何排版按钮时，弹出确认弹窗，确认后将文件升级为 MD 并同步修改磁盘后缀名。
-
-提纯处理：支持将 Markdown 剥离排版标记，生成纯文本供复制给大模型。
-
-图片与多媒体处理：
-
-截图拦截：触发截图后，图片自动存入隐藏文件夹 .assets/。
-
-本地预览：通过 Rust 读取图片二进制流 (read_raw_file) 转换为 Blob URL 进行渲染，绕过 WebView 本地路径安全拦截。
-
-3.3 目录与列表导航 (The Navigator)
-层级渲染：采用递归渲染策略。点击目录仅展示该目录下的直属文件与子文件夹。
-
-对齐逻辑：文件夹与文件在左侧树状视图中，通过固定宽度容器（w-6）实现图标 100% 垂直对齐。
-
-最近访问 (Recent Access)：支持“查看更多历史”，跳转到按时间倒序排列的独立历史视图页面。
-
-4. 稳定性防御体系 (防白屏指南)
-为了彻底解决我们之前遇到的白屏 Bug，开发规范必须遵守以下“铁律”：
-
-ErrorBoundary (错误边界)：
-应用顶层必须包裹一个 ErrorBoundary 组件，拦截所有渲染层崩溃。如果出错，不再白屏，而是显示具体的报错堆栈供调试。
-
-状态与渲染隔离：
-activeNote 等核心依赖变量必须在组件顶部 useState 定义后立即声明。严禁在 return 之后或 useEffect 循环外使用未初始化的状态。
-
-唯一的 React Key：
-在渲染列表时，强制使用 note.id 作为 Key，并对 recentIds 和 openTabs 使用 Array.from(new Set(arr)) 进行强制去重。
-
-异步状态同步：
-禁止在 useEffect 中直接进行高频 DOM 操作。所有涉及 DOM 属性（如图片路径、HTML 渲染）的操作，必须通过 useRef 获取 DOM 引用，并在状态变更后的 useEffect 中执行。
+MIT

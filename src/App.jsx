@@ -4,7 +4,7 @@ import {
   ChevronDown, ChevronRight, ListChecks, Moon, Sun, X, Bold, Italic, 
   List, Eye, Code, FolderOpen, Link as LinkIcon, 
   FileOutput, ArrowRightLeft, Quote, FolderPlus, Library, Camera, CalendarDays, 
-  Clock, Maximize, Minimize, CornerRightUp, Palette, ListTree
+  Clock, Maximize, Minimize, CornerRightUp, Palette, ListTree, RefreshCw
 } from 'lucide-react';
 
 // 稳健的 Tauri 检测，防止 window.__TAURI__ 部分定义时崩溃
@@ -61,7 +61,7 @@ const initialTags = [{ id: 't1', name: '重要', color: '#EF4444' }];
 
 const generatePath = (categoryId, title, format, categories, basePath) => {
   const safeTitle = (title || '未命名').replace(/[\\/:*?"<>|]/g, '');
-  if (!categoryId) return `${basePath}\\未分类\\${safeTitle}.${format}`;
+  if (!categoryId) return `${basePath}\\${safeTitle}.${format}`;
   let path = []; let currentId = categoryId;
   while (currentId) {
     const cat = categories.find(c => c.id === currentId);
@@ -114,7 +114,7 @@ const highlightText = (text, query) => {
   } catch { return str; }
 };
 
-const stripMarkdown = (text) => (text||'').replace(/```[\s\S]*?```/g,'').replace(/[#_*~`]/g,'').replace(/!\[.*?\]\(.*?\)/g,'[图片]').replace(/\[(.*?)\]\(.*?\)/g,'$1').replace(/\[\[(.*?)\]\]/g,'$1').replace(/^\s*[-\d.]\s/gm,'').replace(/\|.*\|/g,'').split('\n').map(l=>l.trim()).filter(l=>l.length>0).join('\n');
+const stripMarkdown = (text) => (text||'').replace(/```[\s\S]*?```/g,'').replace(/<[^>]+>/g,'').replace(/[#_*~`]/g,'').replace(/!\[.*?\]\(.*?\)/g,'[图片]').replace(/\[(.*?)\]\(.*?\)/g,'$1').replace(/\[\[(.*?)\]\]/g,'$1').replace(/^\s*[-\d.]\s/gm,'').replace(/\|.*\|/g,'').split('\n').map(l=>l.trim()).filter(l=>l.length>0).join('\n');
 
 const htmlToMarkdown = (html) => {
   if (!html) return '';
@@ -251,8 +251,8 @@ const renderMarkdown = (rawText) => {
   });
   // 双向链接 + 图片
   text = text.replace(/\[\[(.*?)\]\]/g, '<span class="wiki-link text-blue-600 dark:text-blue-400 font-medium cursor-pointer hover:underline" data-title="$1">[[$1]]</span>');
-  text = text.replace(/!\[(.*?)\|(\d+)\]\((.*?)\)/g, '<img src="$3" data-path="$3" alt="$1" data-width="$2" style="width:$2px;max-width:100%;border-radius:8px;border:1px solid #ddd;margin:12px 0;" class="previewable-img" onerror="window.loadLocalImage(this.getAttribute(\'data-path\'), this)"/>');
-  text = text.replace(/!\[(.*?)\]\((.*?)\)/g, '<img src="$2" data-path="$2" alt="$1" style="max-width:100%;border-radius:8px;border:1px solid #ddd;margin:12px 0;" class="previewable-img" onerror="window.loadLocalImage(this.getAttribute(\'data-path\'), this)"/>');
+  text = text.replace(/!\[(.*?)\|(\d+)\]\((.*?)\)/g, '<img src="$3" data-path="$3" alt="$1" data-width="$2" style="width:$2px;max-width:100%;border-radius:8px;border:1px solid #ddd;margin:12px 0;" class="previewable-img" title="单击编辑尺寸 · 双击放大" onerror="window.loadLocalImage(this.getAttribute(\'data-path\'), this)"/>');
+  text = text.replace(/!\[(.*?)\]\((.*?)\)/g, '<img src="$2" data-path="$2" alt="$1" style="max-width:100%;border-radius:8px;border:1px solid #ddd;margin:12px 0;" class="previewable-img" title="单击编辑尺寸 · 双击放大" onerror="window.loadLocalImage(this.getAttribute(\'data-path\'), this)"/>');
   // 去掉列表项间的换行（不要转为 <br/>）
   text = text.replace(/<\/li>\n/g, '</li>');
   text = text.replace(/\n/g, '<br/>');
@@ -283,6 +283,8 @@ function SuperTxtShell() {
   const [contextMenu, setContextMenu] = useState(null);
   const [creatingCategory, setCreatingCategory] = useState(false);
   const [newCategoryName, setNewCategoryName] = useState('');
+  const [renamingCategoryId, setRenamingCategoryId] = useState(null);
+  const [renameCategoryValue, setRenameCategoryValue] = useState('');
 
   const [showVisualMode, setShowVisualMode] = useState(false);
   const [showTOC, setShowTOC] = useState(false);
@@ -365,9 +367,10 @@ function SuperTxtShell() {
         const targetNote = notes.find(n => n.title === title);
         if (targetNote) { handleOpenNote(targetNote.id); }
         else {
-          const newNote = { id: `n${Date.now()}`, title, content: '', categoryId: activeCategoryId === '__recent__' ? null : activeCategoryId, tags: [], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), format: 'md', isPinned: false };
+          if (!activeCategoryId || activeCategoryId === '__recent__') { showToast('⚠️ 请先在左侧选择一个目录', true); return; }
+          const newNote = { id: `n${Date.now()}`, title, content: '', categoryId: activeCategoryId, tags: [], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), format: 'md', isPinned: false };
           setNotes(prev => [newNote, ...prev]);
-          setOpenTabs(prev => Array.from(new Set([...prev, newNote.id])));
+          setOpenTabs(prev => Array.from(new Set([newNote.id, ...prev])));
           setActiveNoteId(newNote.id);
           showToast(`📝 新建笔记：${title}`);
         }
@@ -402,7 +405,7 @@ function SuperTxtShell() {
               const mdImage = `\n![粘贴图片](${imgPath})\n`;
               if (activeNoteId) {
                 if (showVisualMode && visualEditorRef.current && document.activeElement === visualEditorRef.current) {
-                  document.execCommand('insertHTML', false, `<img src="${imgPath}" data-path="${imgPath}" alt="粘贴图片" style="max-width:100%;border-radius:8px;border:1px solid #ddd;margin:12px 0;cursor:zoom-in;" class="previewable-img" onerror="window.loadLocalImage(this.getAttribute('data-path'), this)"/>`);
+                  document.execCommand('insertHTML', false, `<img src="${imgPath}" data-path="${imgPath}" alt="粘贴图片" style="max-width:100%;border-radius:8px;border:1px solid #ddd;margin:12px 0;" class="previewable-img" title="单击编辑尺寸 · 双击放大" onerror="window.loadLocalImage(this.getAttribute('data-path'), this)"/>`);
                   updateActiveNote({content: syncCheckboxesAndMarkdown(visualEditorRef.current)});
                 } else {
                   const textarea = document.getElementById('note-editor-textarea');
@@ -413,8 +416,9 @@ function SuperTxtShell() {
                 }
                 showToast("✅ 图片已保存并插入");
               } else {
-                const newNote = { id: `n${Date.now()}`, title: `图片笔记_${Date.now()}`, content: mdImage, categoryId: activeCategoryId === '__recent__' ? null : activeCategoryId, tags: [], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), format: 'md', isPinned: false };
-                setNotes(prev => [newNote, ...prev]); setOpenTabs(prev => Array.from(new Set([...prev, newNote.id]))); setActiveNoteId(newNote.id);
+                if (!activeCategoryId || activeCategoryId === '__recent__') { showToast('⚠️ 请先在左侧选择一个目录', true); return; }
+                const newNote = { id: `n${Date.now()}`, title: `图片笔记_${Date.now()}`, content: mdImage, categoryId: activeCategoryId, tags: [], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), format: 'md', isPinned: false };
+                setNotes(prev => [newNote, ...prev]); setOpenTabs(prev => Array.from(new Set([newNote.id, ...prev]))); setActiveNoteId(newNote.id);
               }
             } catch (err) { showToast("❌ 保存图片失败", true); }
             return;
@@ -427,9 +431,10 @@ function SuperTxtShell() {
           const text = e.clipboardData.getData('text/plain');
           if (text) {
             e.preventDefault();
+            if (!activeCategoryId || activeCategoryId === '__recent__') { showToast('⚠️ 请先在左侧选择一个目录', true); return; }
             const newTitle = text.trim().split('\n')[0].substring(0, 30) || '剪贴板笔记';
-            const newNote = { id: `n${Date.now()}`, title: newTitle, content: text, categoryId: activeCategoryId === '__recent__' ? null : activeCategoryId, tags: [], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), format: 'txt', isPinned: false };
-            setNotes(prev => [newNote, ...prev]); setOpenTabs(prev => Array.from(new Set([...prev, newNote.id]))); setActiveNoteId(newNote.id);
+            const newNote = { id: `n${Date.now()}`, title: newTitle, content: text, categoryId: activeCategoryId, tags: [], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), format: 'txt', isPinned: false };
+            setNotes(prev => [newNote, ...prev]); setOpenTabs(prev => Array.from(new Set([newNote.id, ...prev]))); setActiveNoteId(newNote.id);
           }
         }
       }
@@ -620,8 +625,8 @@ function SuperTxtShell() {
   const handleOpenNote = (id) => {
     if (!openTabs.includes(id)) {
       // 标签页上限 10，超出时关闭最早打开的
-      let newTabs = [...openTabs, id];
-      if (newTabs.length > 10) { newTabs = newTabs.slice(newTabs.length - 10); }
+      let newTabs = [id, ...openTabs];
+      if (newTabs.length > 10) { newTabs = newTabs.slice(0, 10); }
       setOpenTabs(Array.from(new Set(newTabs)));
     }
     setActiveNoteId(id);
@@ -656,16 +661,97 @@ function SuperTxtShell() {
   };
 
   const handleCreateNote = () => {
-    const targetCategoryId = activeCategoryId === '__recent__' ? null : activeCategoryId;
+    if (!activeCategoryId || activeCategoryId === '__recent__') {
+      showToast('⚠️ 请先在左侧选择一个目录', true);
+      return;
+    }
+    const targetCategoryId = activeCategoryId;
     let newTitle = '未命名笔记'; let counter = 1;
     while (notes.some(n => n.categoryId === targetCategoryId && n.title === newTitle)) { newTitle = `未命名笔记 (${counter})`; counter++; }
     const newNote = { id: `n${Date.now()}`, title: newTitle, content: '', categoryId: targetCategoryId, tags: [], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), format: 'txt', isPinned: false };
     if(isTauri) invoke('save_local_file', { path: generatePath(newNote.categoryId, newNote.title, newNote.format, categories, workspacePath), content: '' });
     setNotes([newNote, ...notes]);
-    let newTabs = Array.from(new Set([...openTabs, newNote.id]));
-    if (newTabs.length > 10) newTabs = newTabs.slice(newTabs.length - 10);
+    let newTabs = Array.from(new Set([newNote.id, ...openTabs]));
+    if (newTabs.length > 10) newTabs = newTabs.slice(0, 10);
     setOpenTabs(newTabs); setActiveNoteId(newNote.id); setShowVisualMode(false);
     setTimeout(() => { const el = document.getElementById('note-title-input'); if (el) { el.focus(); el.select(); } }, 100);
+  };
+
+  // 扫描工作空间，发现手动复制进来的 .md/.txt 文件并加载到索引
+  const handleScanWorkspace = async () => {
+    if (!isTauri) { showToast('⚠️ 仅 Tauri 桌面端支持扫描', true); return; }
+    try {
+      showToast('🔍 正在扫描工作空间...');
+      const jsonStr = await invoke('scan_workspace', { workspacePath });
+      const files = JSON.parse(jsonStr);
+      if (!files || files.length === 0) {
+        showToast('📭 未发现新文件');
+        return;
+      }
+
+      // 构建已有笔记的路径映射（使用相对路径作为去重键）
+      const existingPaths = new Set(notes.map(n => {
+        if (!n.categoryId) return `${n.title}.${n.format}`;
+        const catPath = getCategoryFullPath(n.categoryId, categories).replace(/ \/ /g, '\\');
+        return `${catPath}\\${n.title}.${n.format}`;
+      }));
+
+      const newNotes = [];
+      const newCats = [];
+
+      for (const file of files) {
+        const fileKey = file.category_path ? `${file.category_path}\\${file.name}.${file.format}` : `${file.name}.${file.format}`;
+        // 跳过已存在的文件（按路径+名称匹配）
+        if (existingPaths.has(fileKey)) continue;
+
+        // 解析/创建分类路径
+        let parentCategoryId = null;
+        if (file.category_path) {
+          const pathSegments = file.category_path.split('\\').filter(s => s);
+          for (const seg of pathSegments) {
+            const existing = categories.find(c => c.name === seg && c.parentId === parentCategoryId);
+            if (existing) {
+              parentCategoryId = existing.id;
+            } else if (!newCats.find(c => c.name === seg && c.parentId === parentCategoryId)) {
+              const newCatId = `cs_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+              newCats.push({ id: newCatId, name: seg, parentId: parentCategoryId, expanded: false });
+              parentCategoryId = newCatId;
+            } else {
+              parentCategoryId = newCats.find(c => c.name === seg && c.parentId === parentCategoryId)?.id || parentCategoryId;
+            }
+          }
+        }
+
+        const createdAt = file.created_secs > 0 ? new Date(file.created_secs * 1000).toISOString() : new Date().toISOString();
+        const updatedAt = file.modified_secs > 0 ? new Date(file.modified_secs * 1000).toISOString() : new Date().toISOString();
+
+        newNotes.push({
+          id: `ns_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+          title: file.name,
+          content: file.content,
+          categoryId: parentCategoryId,
+          tags: [],
+          createdAt,
+          updatedAt,
+          format: file.format,
+          isPinned: false,
+        });
+      }
+
+      if (newNotes.length === 0 && newCats.length === 0) {
+        showToast('📭 所有文件已在索引中，无需导入');
+        return;
+      }
+
+      // 合并新分类和笔记
+      if (newCats.length > 0) setCategories(prev => [...prev, ...newCats]);
+      if (newNotes.length > 0) setNotes(prev => [...newNotes, ...prev]);
+
+      const catMsg = newCats.length > 0 ? ` ${newCats.length} 个新目录` : '';
+      showToast(`✅ 扫描完成：导入 ${newNotes.length} 个文件${catMsg}`);
+    } catch (e) {
+      showToast(`❌ 扫描失败: ${e?.message || e}`, true);
+    }
   };
 
   // 删除笔记 → 移入回收站
@@ -680,6 +766,7 @@ function SuperTxtShell() {
       } catch (e) { /* 文件可能不存在 */ }
     }
     setNotes(prev => prev.filter(n => n.id !== note.id));
+    setRecentIds(prev => prev.filter(id => id !== note.id));
     handleCloseTab(null, note.id);
     showToast("🗑️ 已移入回收站 (.trash)");
   };
@@ -872,7 +959,7 @@ function SuperTxtShell() {
             const altText = '截图';
             if (showVisualMode && visualEditorRef.current) {
               visualEditorRef.current.focus();
-              document.execCommand('insertHTML', false, `<img src="${imgPath}" data-path="${imgPath}" alt="${altText}" style="max-width:100%;border-radius:8px;border:1px solid #ddd;margin:12px 0;" class="previewable-img" onerror="window.loadLocalImage(this.getAttribute('data-path'), this)"/>`);
+              document.execCommand('insertHTML', false, `<img src="${imgPath}" data-path="${imgPath}" alt="${altText}" style="max-width:100%;border-radius:8px;border:1px solid #ddd;margin:12px 0;" class="previewable-img" title="单击编辑尺寸 · 双击放大" onerror="window.loadLocalImage(this.getAttribute('data-path'), this)"/>`);
               updateActiveNote({content: syncCheckboxesAndMarkdown(visualEditorRef.current)});
             } else {
               const textarea = document.getElementById('note-editor-textarea');
@@ -966,7 +1053,7 @@ function SuperTxtShell() {
     const childrenCats = categories.filter(c => c.parentId === parentId);
     const directNotes = notes.filter(n => n.categoryId === parentId);
     return (
-      <ul className="space-y-[1px]">
+      <ul className="space-y-0.5">
         {childrenCats.map(cat => {
           const hasChildren = categories.some(c => c.parentId === cat.id) || notes.some(n=>n.categoryId === cat.id);
           const isRootFolder = parentId === null;
@@ -978,11 +1065,11 @@ function SuperTxtShell() {
           // 图标颜色：统一逻辑（根目录与子目录一致）
           const iconColor = hasDirectFiles ? 'text-emerald-500' : hasSubDirs ? 'text-amber-500' : 'text-gray-400';
           // 选中高亮颜色
-          const selectedBg = hasDirectFiles ? 'bg-emerald-500' : hasSubDirs ? 'bg-amber-500' : 'bg-blue-500';
+          const selectedBg = hasDirectFiles ? 'bg-emerald-400' : hasSubDirs ? 'bg-amber-400' : 'bg-blue-400';
           return (
             <li key={cat.id} className="relative">
-              <div className={`group flex items-center py-1.5 rounded-lg cursor-pointer text-sm transition-all ${isSelected ? `${selectedBg} text-white font-semibold shadow-md` : isAncestor ? `bg-blue-50/80 dark:bg-blue-900/20 text-blue-700 dark:text-blue-200 font-medium` : 'text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800/50'}`}
-                style={{ paddingLeft: `${level * 16 + 8}px`, paddingRight: '8px' }}
+              <div style={{ paddingLeft: `${level * 16 + 8}px` }}>
+              <div className={`group flex items-center py-1.5 pr-2 rounded-lg cursor-pointer text-sm transition-all ${isSelected ? `${selectedBg} text-white font-semibold shadow-md` : isAncestor ? `bg-blue-100 dark:bg-blue-900/40 text-blue-800 dark:text-blue-300 font-medium` : 'text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800/50'}`}
                 onClick={() => { setActiveCategoryId(cat.id); }}
                 onContextMenu={(e) => { e.preventDefault(); setContextMenu({ visible:true, x:e.clientX, y:e.clientY, type:'folder', item: cat}); }}
                 onDragOver={(e) => { e.preventDefault(); e.currentTarget.classList.add('ring-2','ring-blue-400'); }}
@@ -994,9 +1081,14 @@ function SuperTxtShell() {
                 <div className={`w-5 flex items-center justify-center shrink-0 ${isSelected ? 'text-white' : iconColor}`}>
                   {isRootFolder ? <FolderOpen size={14} fill="currentColor" fillOpacity={0.25}/> : <Folder size={14} fill="currentColor" fillOpacity={0.25}/>}
                 </div>
+                {renamingCategoryId === cat.id ? (
+                <input autoFocus value={renameCategoryValue} onChange={e => setRenameCategoryValue(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') handleFinishRename(); if (e.key === 'Escape') setRenamingCategoryId(null); }} onBlur={handleFinishRename} className="flex-1 text-sm text-gray-900 dark:text-gray-100 bg-white dark:bg-gray-700 border rounded px-1 py-0 outline-none focus:border-blue-400" />
+              ) : (
                 <span className="flex-1 truncate leading-none">{cat.name}</span>
+              )}
                 <span className={`text-[10px] ml-1 font-mono px-1.5 rounded-full shrink-0 ${isSelected ? 'bg-white/25 text-white' : 'bg-gray-200/60 dark:bg-gray-700 text-gray-400'}`}>{count}</span>
                 <button onClick={(e) => { e.stopPropagation(); setCreatingCategory(cat.id); }} className={`p-0.5 ml-1 rounded opacity-0 group-hover:opacity-100 transition-opacity ${isSelected?'text-white/70 hover:text-white hover:bg-white/20':'text-gray-300 hover:text-blue-600 hover:bg-blue-50'}`} title="新建子目录"><Plus size={11}/></button>
+              </div>
               </div>
               {/* 新建子目录输入框：显示在该目录下面 */}
               {creatingCategory === cat.id && (
@@ -1010,17 +1102,40 @@ function SuperTxtShell() {
         })}
         {directNotes.map(n => (
           <li key={`file-${n.id}`}>
+            <div style={{ paddingLeft: `${level * 16 + 8}px` }}>
             <div onClick={() => handleOpenNote(n.id)} onContextMenu={(e)=>{e.preventDefault(); setContextMenu({visible:true, x:e.clientX, y:e.clientY, type:'note', item:n})}}
-              className={`flex items-center px-1.5 py-1.5 rounded-md cursor-pointer text-[12.5px] transition-colors ${activeNoteId === n.id ? 'text-blue-600 font-medium bg-blue-50/50' : 'text-gray-500 hover:text-gray-800'}`}
-              style={{ paddingLeft: `${level * 16 + 8}px` }}>
+              className={`flex items-center px-1.5 py-1.5 rounded-md cursor-pointer text-[12.5px] transition-colors ${activeNoteId === n.id ? 'text-blue-700 font-semibold bg-blue-100 dark:bg-blue-900/30 dark:text-blue-300' : 'text-gray-500 hover:text-gray-800'}`}>
               <div className="w-5 shrink-0"></div>
               <div className="w-5 flex items-center justify-center shrink-0"><FileText size={13} className="opacity-60"/></div>
               <span className="truncate leading-none">{n.title || '未命名'}</span>
+            </div>
             </div>
           </li>
         ))}
       </ul>
     );
+  };
+
+  // 重命名目录
+  const handleFinishRename = () => {
+    if (!renamingCategoryId) return;
+    const trimmed = renameCategoryValue.trim();
+    if (!trimmed) { setRenamingCategoryId(null); return; }
+    const cat = categories.find(c => c.id === renamingCategoryId);
+    if (!cat) { setRenamingCategoryId(null); return; }
+    if (categories.some(c => c.id !== renamingCategoryId && c.parentId === cat.parentId && c.name === trimmed)) {
+      showToast('⚠️ 同名目录已存在', true);
+      setRenamingCategoryId(null);
+      return;
+    }
+    setCategories(prev => prev.map(c => c.id === renamingCategoryId ? { ...c, name: trimmed } : c));
+    setRenamingCategoryId(null);
+    showToast('✅ 目录已重命名');
+  };
+  const handleStartRename = (cat) => {
+    setRenamingCategoryId(cat.id);
+    setRenameCategoryValue(cat.name);
+    setContextMenu(null);
   };
 
   // 新建子目录输入框处理
@@ -1053,6 +1168,7 @@ function SuperTxtShell() {
             {contextMenu.type === 'folder' ? (<>
               <button onClick={() => {setCreatingCategory(contextMenu.item.id);setContextMenu(null);}} className="w-full text-left px-4 py-2 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center"><Plus size={14} className="mr-2 text-blue-500"/>新建子目录</button>
               <button onClick={() => {setMoveDialog({type:'folder',item:contextMenu.item,targetId:'root'});setContextMenu(null);}} className="w-full text-left px-4 py-2 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center"><CornerRightUp size={14} className="mr-2 text-green-500"/>移动该目录</button>
+              <button onClick={() => {handleStartRename(contextMenu.item);}} className="w-full text-left px-4 py-2 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center"><span className="mr-2 text-amber-500 w-[14px] text-center">✎</span>重命名</button>
               <div className="h-px bg-gray-200 dark:bg-gray-700 my-1"></div>
               <button onClick={() => {handleDeleteCategory(contextMenu.item);setContextMenu(null);}} className="w-full text-left px-4 py-2 hover:bg-red-50 text-red-600 flex items-center"><Trash2 size={14} className="mr-2"/>删除目录</button>
             </>) : contextMenu.type === 'tab' ? (<>
@@ -1159,7 +1275,7 @@ function SuperTxtShell() {
               })}
             </div>
             <div className="px-6 py-3 bg-gray-50 dark:bg-gray-900 flex justify-between items-center text-xs text-gray-500">
-              <span>共 {Array.from(new Set(recentIds)).length} 条记录</span>
+              <span>共 {Array.from(new Set(recentIds)).filter(id => notes.some(n => n.id === id)).length} 条记录</span>
               <div className="flex space-x-2">
                 <button disabled={recentPage<=1} onClick={()=>setRecentPage(p=>p-1)} className="px-2 py-1 bg-gray-200 dark:bg-gray-700 rounded disabled:opacity-30">上一页</button>
                 <button disabled={recentPage*ITEMS_PER_PAGE>=recentIds.length} onClick={()=>setRecentPage(p=>p+1)} className="px-2 py-1 bg-gray-200 dark:bg-gray-700 rounded disabled:opacity-30">下一页</button>
@@ -1187,7 +1303,7 @@ function SuperTxtShell() {
             <span className={`ml-auto text-[10px] px-1.5 rounded-full font-mono ${activeCategoryId===null?'bg-white/20 text-white':'bg-gray-200/60 text-gray-500'}`}>{notes.length}</span>
           </div>
           <div onClick={()=>setActiveCategoryId('__recent__')} className={`flex items-center px-3 py-2 rounded-lg cursor-pointer text-sm font-medium transition-colors ${activeCategoryId==='__recent__'?'bg-blue-600 text-white':'text-gray-700 dark:text-gray-300 hover:bg-gray-200/60 dark:hover:bg-gray-700'}`}><Clock size={16} className="mr-2.5"/>最近访问
-            <span className={`ml-auto text-[10px] px-1.5 rounded-full font-mono ${activeCategoryId==='__recent__'?'bg-white/20 text-white':'bg-gray-200/60 text-gray-500'}`}>{Array.from(new Set(recentIds)).length}</span>
+            <span className={`ml-auto text-[10px] px-1.5 rounded-full font-mono ${activeCategoryId==='__recent__'?'bg-white/20 text-white':'bg-gray-200/60 text-gray-500'}`}>{Array.from(new Set(recentIds)).filter(id => notes.some(n => n.id === id)).length}</span>
           </div>
           <div>
             <div className="text-xs font-semibold text-gray-400 dark:text-gray-500 mb-2 flex justify-between items-center px-1">
@@ -1197,6 +1313,7 @@ function SuperTxtShell() {
                   <button onClick={()=>setCategories(prev=>prev.map(c=>({...c, expanded:false})))} className="hover:text-blue-500 text-[10px] px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-700" title="一键折叠所有展开目录">折叠({expandedCount})</button>
                 )}
                 <button onClick={()=>setCreatingCategory('root')} className="hover:text-blue-500" title="新建顶层目录"><FolderPlus size={14}/></button>
+                <button onClick={handleScanWorkspace} className="hover:text-green-500" title="扫描工作空间中的文件"><RefreshCw size={14}/></button>
               </div>
             </div>
             {renderCategoryTree(null, 0)}
@@ -1218,8 +1335,8 @@ function SuperTxtShell() {
       {/* ===== 2. 中间栏 - 笔记列表 ===== */}
       <div className={`w-72 border-r flex flex-col shrink-0 relative ${zenMode?'w-0 hidden':''} ${theme==='dark'?'bg-gray-900/50 border-gray-700':'bg-[#fcfcfc] border-gray-200'}`}>
         <div className="p-3 border-b border-gray-200 dark:border-gray-700 space-y-3 shrink-0">
-          <div className="relative"><Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400"/><input type="text" placeholder="搜索标题或内容..." value={searchQuery} onChange={e=>setSearchQuery(e.target.value)} className="w-full pl-8 pr-3 py-1.5 bg-gray-100 dark:bg-gray-800 rounded-md text-sm outline-none"/></div>
-          <button onClick={handleCreateNote} className="w-full flex items-center justify-center py-1.5 bg-blue-600 text-white rounded-md text-sm"><Plus size={16} className="mr-1"/> 新建笔记</button>
+          <div className="relative"><Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400"/><input type="text" placeholder="搜索标题或内容..." value={searchQuery} onChange={e=>setSearchQuery(e.target.value)} className="w-full pl-8 pr-8 py-1.5 bg-gray-100 dark:bg-gray-800 rounded-md text-sm outline-none"/>{searchQuery && <button onClick={()=>setSearchQuery('')} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 p-0.5 rounded"><X size={14}/></button>}</div>
+          <button onClick={handleCreateNote} disabled={!activeCategoryId || activeCategoryId === '__recent__'} title={!activeCategoryId || activeCategoryId === '__recent__' ? '请先在左侧目录树中选择一个目录' : '新建笔记'} className={`w-full flex items-center justify-center py-1.5 rounded-md text-sm transition-colors ${!activeCategoryId || activeCategoryId === '__recent__' ? 'bg-gray-300 text-gray-500 cursor-not-allowed' : 'bg-blue-600 text-white hover:bg-blue-700'}`}><Plus size={16} className="mr-1"/> 新建笔记</button>
         </div>
         {activeCategoryId && activeCategoryId !== '__recent__' && (
           <div className="px-4 py-2 text-[11px] text-gray-500 bg-gray-50 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 flex items-center"><FolderOpen size={12} className="mr-1.5"/>{getCategoryFullPath(activeCategoryId, categories)}</div>
@@ -1282,7 +1399,8 @@ function SuperTxtShell() {
                 <button onMouseDown={(e)=>e.preventDefault()} onClick={()=>handleToolbarAction('bold')} className={`toolbar-btn p-1.5 rounded transition-all active:scale-90 ${activeFormats.bold?'bg-blue-100 text-blue-600 dark:bg-blue-900/40':'text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700'}`} title="加粗 (Ctrl+B)"><Bold size={14}/></button>
                 <button onMouseDown={(e)=>e.preventDefault()} onClick={()=>handleToolbarAction('italic')} className={`toolbar-btn p-1.5 rounded transition-all active:scale-90 ${activeFormats.italic?'bg-blue-100 text-blue-600 dark:bg-blue-900/40':'text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700'}`} title="斜体 (Ctrl+I)"><Italic size={14}/></button>
                 <button onMouseDown={(e)=>e.preventDefault()} onClick={()=>handleToolbarAction('quote')} className={`toolbar-btn p-1.5 rounded transition-all active:scale-90 ${activeFormats.quote?'bg-blue-100 text-blue-600 dark:bg-blue-900/40':'text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700'}`} title="引用块"><Quote size={14}/></button>
-                <div className="relative color-picker-container">
+                {(showVisualMode || activeNote.format === 'txt') && (
+                  <div className="relative color-picker-container">
                     <button onMouseDown={(e)=>e.preventDefault()} onClick={()=>{
                       // TXT 格式：直接触发升级流程
                       if (activeNote.format === 'txt') { handleToolbarAction('color'); return; }
@@ -1353,6 +1471,7 @@ function SuperTxtShell() {
                       </div>
                     )}
                   </div>
+                )}
                 <div className="w-px h-3 bg-gray-200 dark:bg-gray-700 mx-1"></div>
                 <button onMouseDown={(e)=>e.preventDefault()} onClick={()=>handleToolbarAction('h1')} className={`toolbar-btn p-1.5 font-bold text-[12px] rounded transition-all active:scale-90 ${activeFormats.h1?'bg-blue-100 text-blue-600 dark:bg-blue-900/40':'text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700'}`} title="一级标题">H1</button>
                 <button onMouseDown={(e)=>e.preventDefault()} onClick={()=>handleToolbarAction('h2')} className={`toolbar-btn p-1.5 font-bold text-[12px] rounded transition-all active:scale-90 ${activeFormats.h2?'bg-blue-100 text-blue-600 dark:bg-blue-900/40':'text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700'}`} title="二级标题">H2</button>

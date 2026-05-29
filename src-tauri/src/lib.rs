@@ -2,6 +2,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(debug_assertions)]
 use tauri::Manager;
 
 fn ensure_parent_dir(path: &Path) -> Result<(), String> {
@@ -98,6 +99,73 @@ fn open_folder(path: String) -> Result<(), String> {
     }
 }
 
+/// 扫描工作空间，发现 .md/.txt 文件并返回元数据列表
+/// 跳过 .trash .assets .git node_modules target 等特殊目录
+#[tauri::command]
+fn scan_workspace(workspace_path: String) -> Result<String, String> {
+    #[derive(serde::Serialize)]
+    struct FileEntry {
+        relative_path: String,  // 相对于 workspace 的路径
+        name: String,           // 文件名（不含扩展名）
+        format: String,         // md 或 txt
+        category_path: String,  // 父目录相对路径（用于匹配分类）
+        content: String,        // 文件内容
+        created_secs: u64,      // 创建时间（Unix 秒）
+        modified_secs: u64,     // 修改时间（Unix 秒）
+    }
+
+    let wp = PathBuf::from(&workspace_path);
+    if !wp.exists() || !wp.is_dir() {
+        return Err(format!("工作空间目录不存在: {}", workspace_path));
+    }
+
+    let skip_dirs = ["\\.trash", "\\.assets", "\\.git", "\\node_modules", "\\target", "\\gen"];
+    let mut results: Vec<FileEntry> = Vec::new();
+
+    fn walk(dir: &Path, workspace: &Path, skip_dirs: &[&str], results: &mut Vec<FileEntry>) -> Result<(), String> {
+        let entries = fs::read_dir(dir).map_err(|e| format!("枚举失败 [{}]: {}", dir.display(), e))?;
+        for ent in entries.flatten() {
+            let path = ent.path();
+            let path_str = path.to_string_lossy().to_string();
+            // 跳过特殊目录
+            if path.is_dir() {
+                if skip_dirs.iter().any(|s| path_str.contains(*s) || path_str.ends_with(s.replace('\\', "").as_str())) {
+                    continue;
+                }
+                walk(&path, workspace, skip_dirs, results)?;
+            } else if path.is_file() {
+                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+                if ext != "md" && ext != "txt" { continue; }
+                // 跳过 supertxt_index.json
+                if path.file_name().map(|n| n == "supertxt_index.json").unwrap_or(false) { continue; }
+                
+                let content = fs::read_to_string(&path).unwrap_or_default();
+                let relative = path.strip_prefix(workspace).map(|p| p.to_string_lossy().to_string()).unwrap_or(path_str.clone());
+                let name = path.file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                let parent_relative = path.parent().and_then(|p| p.strip_prefix(workspace).ok()).map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+                
+                let created = fs::metadata(&path).ok().and_then(|m| m.created().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
+                
+                let modified = fs::metadata(&path).ok().and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
+
+                results.push(FileEntry {
+                    relative_path: relative,
+                    name,
+                    format: ext,
+                    category_path: parent_relative,
+                    content,
+                    created_secs: created,
+                    modified_secs: modified,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    walk(&wp, &wp, &skip_dirs, &mut results)?;
+    serde_json::to_string(&results).map_err(|e| format!("序列化失败: {}", e))
+}
+
 /// 启动系统截图工具（Windows: SnippingTool / Win+Shift+S；其它平台占位）
 #[tauri::command]
 fn start_screenshot() -> Result<(), String> {
@@ -129,7 +197,8 @@ pub fn run() {
             delete_local_item,
             list_dir,
             open_folder,
-            start_screenshot
+            start_screenshot,
+            scan_workspace
         ])
         .setup(|app| {
             // 开发阶段自动打开 DevTools，便于排查白屏等问题
