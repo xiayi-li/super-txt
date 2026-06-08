@@ -58,29 +58,18 @@ npm run tauri dev
 | **适用场景** | Win11 / 已更新 Win10 / 联网机器 | 内网、离线、全新未更新系统 |
 | **配置值** | `"skip"`（默认） | `"offlineInstaller"` |
 
-> Win11 自带 WebView2；Win10 也会通过 Windows Update 自动推送。大多数情况下使用轻量安装包即可。
 
-### 轻量安装包（默认，~3MB）
+### 一键生成两个安装包
+npm run bundle:all
 
-目标机器需已安装 WebView2（Win11 自带，Win10 通过 Windows Update 自动推送）：
+### 或单独生成
+npm run bundle:lite    # 轻量版 ~2MB
+npm run bundle:full    # 离线完整版 ~197MB
 
-```powershell
-$env:Path = "C:\Program Files (x86)\NSIS\Bin;$env:Path"
-npm run tauri build -- --bundles nsis
-```
+输出路径：src-tauri\target\release\bundle\nsis\
+SuperTxt_1.0.0_x64-setup-lite.exe
+SuperTxt_1.0.0_x64-setup-full.exe
 
-### 离线安装包（~200MB，内网可用）
-
-自带 WebView2 完整运行时，无需联网：
-
-1. 修改 `src-tauri/tauri.conf.json` 中 `webviewInstallMode`：
-   ```json
-   "webviewInstallMode": { "type": "offlineInstaller" }
-   ```
-2. 执行构建命令（同上）
-3. 构建完成后改回 `"skip"`
-
-**输出路径：** `src-tauri/target/release/bundle/nsis/SuperTxt_1.0.0_x64-setup.exe`
 
 ## 项目结构
 

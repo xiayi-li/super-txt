@@ -198,6 +198,9 @@ const htmlToMarkdown = (html) => {
   // 去除列表项之间多余的空行（连续 - 开头的行之间不应有空行）
   md = md.replace(/^([-*] .*)\n\n+([-*] )/gm, '$1\n$2');
   md = md.replace(/^(- \[[ x]\] .*)\n\n+(- \[[ x]\] )/gm, '$1\n$2');
+  // 去除标题与列表之间的多余空行
+  md = md.replace(/^(#{1,6} .+)\n\n+(- \[[ x]\] )/gm, '$1\n$2');
+  md = md.replace(/^(#{1,6} .+)\n\n+([-*] )/gm, '$1\n$2');
   // 最多保留一个空行
   md = md.replace(/\n{3,}/g, '\n\n');
   return md.trim();
@@ -255,6 +258,8 @@ const renderMarkdown = (rawText) => {
   text = text.replace(/!\[(.*?)\]\((.*?)\)/g, '<img src="$2" data-path="$2" alt="$1" style="max-width:100%;border-radius:8px;border:1px solid #ddd;margin:12px 0;" class="previewable-img" title="单击编辑尺寸 · 双击放大" onerror="window.loadLocalImage(this.getAttribute(\'data-path\'), this)"/>');
   // 去掉列表项间的换行（不要转为 <br/>）
   text = text.replace(/<\/li>\n/g, '</li>');
+  // 去掉标题与列表之间的换行（避免日期与待办之间多余空行）
+  text = text.replace(/<\/h([1-6])>\n(<li|<ul|<ol)/gi, '</h$1>$2');
   text = text.replace(/\n/g, '<br/>');
   return text;
 };
@@ -325,6 +330,13 @@ function SuperTxtShell() {
   const saveTimeoutId = useRef(null);
   const contentSyncId = useRef(null);
   const savedSelectionRef = useRef(null);
+  // 模式切换时存储实时 markdown 内容，防止异步 state 导致内容丢失
+  const pendingSourceContentRef = useRef(null);
+  // 追踪当前激活笔记 ID，防止延迟同步把新笔记内容写入旧笔记
+  const activeNoteIdRef = useRef(null);
+  useEffect(() => { activeNoteIdRef.current = activeNoteId; }, [activeNoteId]);
+  // 定期自动保存：追踪上次已存内容，避免重复写盘
+  const lastAutoSavedRef = useRef({ id: null, content: '' });
 
   const activeNote = useMemo(() => notes.find(n => n.id === activeNoteId), [notes, activeNoteId]);
   const docHeadings = useMemo(() => {
@@ -412,7 +424,7 @@ function SuperTxtShell() {
                   if (textarea && document.activeElement === textarea) {
                     const start = textarea.selectionStart; const text = textarea.value;
                     updateActiveNote({content: text.substring(0, start) + mdImage + text.substring(textarea.selectionEnd)});
-                  } else { setNotes(prev => prev.map(n => n.id === activeNoteId ? { ...n, content: n.content + mdImage, updatedAt: new Date().toISOString() } : n)); }
+                  } else { updateActiveNote({content: (notes.find(n => n.id === activeNoteId)?.content || '') + mdImage}); }
                 }
                 showToast("✅ 图片已保存并插入");
               } else {
@@ -483,6 +495,62 @@ function SuperTxtShell() {
     initData();
   }, [workspacePath]);
 
+  // 应急备份恢复：启动时检测上次崩溃前保存的备份
+  useEffect(() => {
+    if (!isDataLoaded || !isTauri) return;
+    try {
+      const raw = localStorage.getItem('supertxt_emergency');
+      if (!raw) return;
+      const backup = JSON.parse(raw);
+      if (!backup || !backup.id || !backup.content) { localStorage.removeItem('supertxt_emergency'); return; }
+      const note = notes.find(n => n.id === backup.id);
+      if (!note) { localStorage.removeItem('supertxt_emergency'); return; }
+      const backupTime = new Date(backup.time).getTime();
+      const noteTime = new Date(note.updatedAt).getTime();
+      // 备份比已保存的版本新 → 恢复
+      if (backupTime > noteTime) {
+        console.log('[SuperTxt] 检测到应急备份，恢复笔记:', note.title);
+        setNotes(prev => prev.map(n => {
+          if (n.id === backup.id) {
+            const restored = { ...n, content: backup.content, updatedAt: backup.time };
+            const path = generatePath(restored.categoryId, restored.title, restored.format, categories, workspacePath);
+            invoke('save_local_file', { path, content: backup.content }).catch(() => {});
+            return restored;
+          }
+          return n;
+        }));
+      }
+      localStorage.removeItem('supertxt_emergency');
+    } catch { localStorage.removeItem('supertxt_emergency'); }
+  }, [isDataLoaded]);
+
+  // 定期自动保存：每 5 秒无条件保存当前笔记到磁盘（最后安全网）
+  useEffect(() => {
+    if (!isDataLoaded || !isTauri) return;
+    const interval = setInterval(() => {
+      try {
+        if (!activeNoteId) return;
+        // 获取当前实时内容
+        let content = null;
+        if (showVisualMode && visualEditorRef.current) {
+          content = syncCheckboxesAndMarkdown(visualEditorRef.current);
+        } else {
+          const note = notes.find(n => n.id === activeNoteId);
+          if (note) content = note.content;
+        }
+        if (content === null) return;
+        // 与上次自动保存内容一致则跳过
+        if (lastAutoSavedRef.current.id === activeNoteId && lastAutoSavedRef.current.content === content) return;
+        const note = notes.find(n => n.id === activeNoteId);
+        if (!note) return;
+        const path = generatePath(note.categoryId, note.title, note.format, categories, workspacePath);
+        invoke('save_local_file', { path, content }).catch(() => {});
+        lastAutoSavedRef.current = { id: activeNoteId, content };
+      } catch {}
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [isDataLoaded, activeNoteId, showVisualMode, notes, categories, workspacePath]);
+
   // 自动保存索引
   useEffect(() => {
     if (!isDataLoaded || !isTauri) return;
@@ -491,6 +559,54 @@ function SuperTxtShell() {
     }, 1500);
     return () => clearTimeout(timer);
   }, [notes, categories, tags, recentIds, isDataLoaded, workspacePath]);
+
+  // 保险机制：页面关闭/隐藏时强制保存当前笔记内容
+  useEffect(() => {
+    const getCurrentContent = () => {
+      if (!activeNoteId) return null;
+      if (showVisualMode && visualEditorRef.current) {
+        return syncCheckboxesAndMarkdown(visualEditorRef.current);
+      }
+      const textarea = document.getElementById('note-editor-textarea');
+      if (textarea) return textarea.value;
+      const note = notes.find(n => n.id === activeNoteId);
+      return note ? note.content : null;
+    };
+    // beforeunload: localStorage 应急备份（防止崩溃丢失）
+    const handleBeforeUnload = () => {
+      try {
+        const content = getCurrentContent();
+        if (content !== null && activeNoteId) {
+          localStorage.setItem('supertxt_emergency', JSON.stringify({
+            id: activeNoteId,
+            content,
+            time: new Date().toISOString()
+          }));
+        }
+      } catch {}
+    };
+    // visibilitychange: 切换应用时存盘
+    const handleVisibility = () => {
+      if (document.hidden && activeNoteId && isTauri) {
+        try {
+          const content = getCurrentContent();
+          if (content !== null) {
+            const note = notes.find(n => n.id === activeNoteId);
+            if (note) {
+              const path = generatePath(note.categoryId, note.title, note.format, categories, workspacePath);
+              invoke('save_local_file', { path, content }).catch(() => {});
+            }
+          }
+        } catch {}
+      }
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
+  }, [activeNoteId, showVisualMode, notes, categories, workspacePath]);
 
   // 侧边栏拖拽
   useEffect(() => {
@@ -597,7 +713,8 @@ function SuperTxtShell() {
     const hasTitleChange = (updates.title !== undefined && updates.title !== currentNote.title);
     const hasFormatChange = (updates.format !== undefined && updates.format !== currentNote.format);
     if (!hasContentChange && !hasTitleChange && !hasFormatChange && Object.keys(updates).every(k => ['content','title','format'].includes(k))) return;
-    setNotes(notes.map(n => {
+    // 使用 functional setState 避免 stale closure 导致并发更新覆盖
+    setNotes(prev => prev.map(n => {
       if (n.id === activeNoteId) {
         let updatedNote = { ...n, ...updates, updatedAt: new Date().toISOString() };
         if (hasTitleChange || hasFormatChange) {
@@ -623,6 +740,8 @@ function SuperTxtShell() {
   };
 
   const handleOpenNote = (id) => {
+    // 清理旧笔记的延迟同步定时器，防止交叉污染
+    if (contentSyncId.current) { clearTimeout(contentSyncId.current); contentSyncId.current = null; }
     if (!openTabs.includes(id)) {
       // 标签页上限 10，超出时关闭最早打开的
       let newTabs = [id, ...openTabs];
@@ -653,8 +772,14 @@ function SuperTxtShell() {
     }
   };
 
-  const handleCloseTab = (e, id) => {
+  const handleCloseTab = (e, id, skipSave = false) => {
     if (e?.stopPropagation) e.stopPropagation();
+    // 关闭当前活跃标签页时，强制保存视觉编辑器内容（右键菜单不触发 onBlur）
+    // skipSave: 删除笔记等场景不需要保存（文件已移入回收站）
+    if (!skipSave && activeNoteId === id && showVisualMode && visualEditorRef.current) {
+      if (contentSyncId.current) clearTimeout(contentSyncId.current);
+      updateActiveNote({ content: syncCheckboxesAndMarkdown(visualEditorRef.current) });
+    }
     const newTabs = openTabs.filter(t => t !== id);
     setOpenTabs(newTabs);
     if (activeNoteId === id) setActiveNoteId(newTabs.length > 0 ? newTabs[newTabs.length - 1] : null);
@@ -767,7 +892,9 @@ function SuperTxtShell() {
     }
     setNotes(prev => prev.filter(n => n.id !== note.id));
     setRecentIds(prev => prev.filter(id => id !== note.id));
-    handleCloseTab(null, note.id);
+    // 清理延迟同步定时器，跳过保存（文件已移入回收站）
+    if (contentSyncId.current) { clearTimeout(contentSyncId.current); contentSyncId.current = null; }
+    handleCloseTab(null, note.id, true);
     showToast("🗑️ 已移入回收站 (.trash)");
   };
 
@@ -799,10 +926,17 @@ function SuperTxtShell() {
       case 'heading': prefix = '### '; defaultText = '三级标题'; break;
       case 'list': prefix = '\n- '; defaultText = '列表项'; suffix = '\n- 列表项2\n- 列表项3\n'; break;
       case 'quote': prefix = '\n> '; defaultText = '引用内容'; suffix = '\n'; break;
-      case 'todo': prefix = '\n- [ ] '; defaultText = '待办事项'; suffix = '\n'; break;
-      case 'todoTemplate':
-        prefix = `\n## 📅 ${new Date().getFullYear()}-${String(new Date().getMonth()+1).padStart(2,'0')}-${String(new Date().getDate()).padStart(2,'0')} ${String(new Date().getHours()).padStart(2,'0')}:${String(new Date().getMinutes()).padStart(2,'0')} 待办\n- [ ] [重要] `;
-        defaultText = '高优先级任务'; suffix = '\n- [ ] [常规] 常规任务\n'; break;
+      case 'todo': { 
+        const now = new Date(); const pad = n=>n.toString().padStart(2,'0');
+        prefix = '\n- [ ] '; defaultText = `待办事项 [创建 ${pad(now.getHours())}:${pad(now.getMinutes())}]`; suffix = '\n'; break;
+      }
+      case 'todoTemplate': {
+        const now = new Date();
+        const pad = n=>n.toString().padStart(2,'0');
+        const timeStr = `[创建 ${pad(now.getHours())}:${pad(now.getMinutes())}]`;
+        prefix = `\n\n## 📅 ${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())} 待办\n- [ ]`;
+        defaultText = `高优先级任务 ${timeStr}`; suffix = `\n- [ ] 常规任务 ${timeStr}\n`; break;
+      }
       case 'timestamp': {
         const now = new Date(); const pad2 = n=>n.toString().padStart(2,'0');
         prefix = `${now.getFullYear()}-${pad2(now.getMonth()+1)}-${pad2(now.getDate())} ${pad2(now.getHours())}:${pad2(now.getMinutes())} `;
@@ -889,12 +1023,16 @@ function SuperTxtShell() {
         case 'heading': document.execCommand('formatBlock', false, 'H3'); break;
         case 'list': document.execCommand('insertUnorderedList', false, null); break;
         case 'quote': document.execCommand('formatBlock', false, 'BLOCKQUOTE'); break;
-        case 'todo': document.execCommand('insertHTML', false, '<ul><li style="list-style:none;"><input type="checkbox" style="margin-right:8px;"/> 待办事项</li></ul>'); break;
+        case 'todo': { 
+          const now = new Date(); const pad = n=>n.toString().padStart(2,'0');
+          document.execCommand('insertHTML', false, `<ul><li style="list-style:none;"><input type="checkbox" style="margin-right:8px;"/> 待办事项 [创建 ${pad(now.getHours())}:${pad(now.getMinutes())}]</li></ul>`); break;
+        }
         case 'todoTemplate': {
           const now = new Date();
           const pad = n=>n.toString().padStart(2,'0');
-          const dateStr = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
-          document.execCommand('insertHTML', false, `<br/><h2>📅 ${dateStr} 待办</h2><ul><li style="list-style:none;"><input type="checkbox" style="margin-right:8px;"/> [重要] 高优先级任务</li><li style="list-style:none;"><input type="checkbox" style="margin-right:8px;"/> [常规] 常规任务</li></ul><br/>`);
+          const timeStr = `[创建 ${pad(now.getHours())}:${pad(now.getMinutes())}]`;
+          const dateStr = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())} `;
+          document.execCommand('insertHTML', false, `<br/><br/><h2>📅 ${dateStr} 待办</h2><ul><li style="list-style:none;"><input type="checkbox" style="margin-right:8px;"/> 高优先级任务 ${timeStr}</li><li style="list-style:none;"><input type="checkbox" style="margin-right:8px;"/> 常规任务 ${timeStr}</li></ul><br/>`);
           break;
         }
         case 'timestamp': {
@@ -910,8 +1048,9 @@ function SuperTxtShell() {
       }
       // 防抖同步到 state
       if (contentSyncId.current) clearTimeout(contentSyncId.current);
+      const expectedId = activeNoteIdRef.current;
       contentSyncId.current = setTimeout(() => {
-        if (visualEditorRef.current) {
+        if (visualEditorRef.current && visualEditorRef.current.getAttribute('data-note-id') === expectedId) {
           updateActiveNote({ content: syncCheckboxesAndMarkdown(visualEditorRef.current) });
         }
       }, 600);
@@ -926,10 +1065,14 @@ function SuperTxtShell() {
   const toggleVisualMode = (toVisual) => {
     if (!activeNoteId) return;
     if (!toVisual && visualEditorRef.current) {
-      // 保存当前可视内容为 markdown
-      updateActiveNote({ content: syncCheckboxesAndMarkdown(visualEditorRef.current) });
+      // 保存当前可视内容为 markdown，同时存入 ref 确保切换后 textarea 读到最新内容
+      const mdContent = syncCheckboxesAndMarkdown(visualEditorRef.current);
+      pendingSourceContentRef.current = mdContent;
+      updateActiveNote({ content: mdContent });
     }
     if (toVisual && visualEditorRef.current) {
+      // 清除 ref 残留
+      pendingSourceContentRef.current = null;
       // 强制清除 data-note-id，确保切换回视觉时重新渲染最新 markdown
       visualEditorRef.current.removeAttribute('data-note-id');
     }
@@ -1532,6 +1675,25 @@ function SuperTxtShell() {
                             // 标题或引用 Enter → 插入段落并切为正文
                             if (/^h[1-6]$/.test(block) || block === 'blockquote') {
                               e.preventDefault();
+                              const sel = window.getSelection();
+                              // 检测光标是否在标题开头（offset 0）→ 在标题前插入新段落
+                              if (sel && sel.isCollapsed && sel.anchorNode && sel.anchorOffset === 0) {
+                                const headingEl = sel.anchorNode.nodeType === 3
+                                  ? sel.anchorNode.parentElement.closest('h1,h2,h3,h4,h5,h6,blockquote')
+                                  : sel.anchorNode.closest('h1,h2,h3,h4,h5,h6,blockquote');
+                                if (headingEl && headingEl === sel.anchorNode.parentElement?.closest('h1,h2,h3,h4,h5,h6,blockquote')) {
+                                  const p = document.createElement('p');
+                                  p.innerHTML = '<br>';
+                                  headingEl.parentNode.insertBefore(p, headingEl);
+                                  const range = document.createRange();
+                                  range.setStart(p, 0);
+                                  range.collapse(true);
+                                  sel.removeAllRanges();
+                                  sel.addRange(range);
+                                  return;
+                                }
+                              }
+                              // 非开头位置：正常拆分并切为正文
                               document.execCommand('insertParagraph', false, null);
                               document.execCommand('formatBlock', false, 'p');
                             }
@@ -1541,7 +1703,12 @@ function SuperTxtShell() {
                       onInput={(e)=>{
                         if(contentSyncId.current) clearTimeout(contentSyncId.current);
                         const el = e.currentTarget;
-                        contentSyncId.current = setTimeout(()=>updateActiveNote({content: syncCheckboxesAndMarkdown(el)}), 800);
+                        const expectedId = activeNoteIdRef.current;
+                        contentSyncId.current = setTimeout(()=>{
+                          // 防止切换笔记后延迟回调把新笔记内容写入旧笔记
+                          if (!visualEditorRef.current || visualEditorRef.current.getAttribute('data-note-id') !== expectedId) return;
+                          updateActiveNote({content: syncCheckboxesAndMarkdown(el)});
+                        }, 800);
                       }}
                       onMouseDown={(e) => {
                         // 图片点击选中显示尺寸控件
@@ -1554,11 +1721,39 @@ function SuperTxtShell() {
                       onClick={(e) => {
                         // 点击非图片区域取消图片选中
                         if (e.target.tagName !== 'IMG') setSelectedImage(null);
-                        // checkbox 被点击 → 属性同步后立即保存
+                        // checkbox 被点击 → 切换删除线样式 + 添加/移除完成时间 + 立即保存
                         if (e.target.type === 'checkbox') {
+                          const cb = e.target;
+                          const li = cb.closest('li');
+                          if (li) {
+                            // 更新文本节点：添加或移除完成时间
+                            let textNode = null;
+                            for (const child of li.childNodes) {
+                              if (child.nodeType === 3 && child.textContent.trim()) { textNode = child; break; }
+                            }
+                            if (textNode) {
+                              let text = textNode.textContent;
+                              // 移除已有的完成时间标记
+                              text = text.replace(/\s*\[完成\s+\d{2}:\d{2}\]\s*$/, '');
+                              if (cb.checked) {
+                                const now = new Date(); const pad = n=>n.toString().padStart(2,'0');
+                                text = text.trimEnd() + ` [完成 ${pad(now.getHours())}:${pad(now.getMinutes())}]`;
+                              }
+                              textNode.textContent = text;
+                            }
+                            // 切换删除线样式
+                            if (cb.checked) {
+                              li.style.color = '#9ca3af';
+                              li.style.textDecoration = 'line-through';
+                            } else {
+                              li.style.color = '';
+                              li.style.textDecoration = '';
+                            }
+                          }
                           if (contentSyncId.current) clearTimeout(contentSyncId.current);
+                          const expectedId = activeNoteIdRef.current;
                           contentSyncId.current = setTimeout(() => {
-                            if (visualEditorRef.current) updateActiveNote({content: syncCheckboxesAndMarkdown(visualEditorRef.current)});
+                            if (visualEditorRef.current && visualEditorRef.current.getAttribute('data-note-id') === expectedId) updateActiveNote({content: syncCheckboxesAndMarkdown(visualEditorRef.current)});
                           }, 0);
                         }
                       }}
@@ -1578,17 +1773,25 @@ function SuperTxtShell() {
                         <div className="fixed bg-white dark:bg-gray-800 shadow-2xl border border-gray-200 dark:border-gray-700 rounded-lg p-2.5 flex items-center gap-2 z-[100]" style={{ top: rect.bottom + 6, left: Math.max(8, rect.left) }}>
                           <span className="text-[11px] text-gray-500 shrink-0">宽:</span>
                           {[100, 200, 300, 450, 600].map(w => (
-                            <button key={w} onMouseDown={(e) => { e.preventDefault(); selectedImage.style.width = w + 'px'; selectedImage.setAttribute('data-width', w); setSelectedImage(null); if(contentSyncId.current) clearTimeout(contentSyncId.current); contentSyncId.current = setTimeout(()=>{if(visualEditorRef.current) updateActiveNote({content:syncCheckboxesAndMarkdown(visualEditorRef.current)});},300); }}
+                            <button key={w} onMouseDown={(e) => { e.preventDefault(); selectedImage.style.width = w + 'px'; selectedImage.setAttribute('data-width', w); setSelectedImage(null); if(contentSyncId.current) clearTimeout(contentSyncId.current); const expectedId = activeNoteIdRef.current; contentSyncId.current = setTimeout(()=>{if(visualEditorRef.current && visualEditorRef.current.getAttribute('data-note-id') === expectedId) updateActiveNote({content:syncCheckboxesAndMarkdown(visualEditorRef.current)});},300); }}
                               className={`px-2 py-0.5 text-[11px] rounded transition-colors ${selectedImage.offsetWidth === w ? 'bg-blue-500 text-white' : 'bg-gray-100 dark:bg-gray-700 hover:bg-blue-100 hover:text-blue-600'}`}>{w}</button>
                           ))}
-                          <input type="number" defaultValue={Math.round(selectedImage.offsetWidth)} min={50} max={1200} className="w-14 px-1.5 py-0.5 text-[11px] border rounded dark:bg-gray-700 dark:border-gray-600 outline-none text-center" onKeyDown={(e) => { if(e.key==='Enter') { const v = Math.max(50, parseInt(e.target.value)||300); selectedImage.style.width = v+'px'; selectedImage.setAttribute('data-width',v); setSelectedImage(null); if(contentSyncId.current) clearTimeout(contentSyncId.current); contentSyncId.current = setTimeout(()=>{if(visualEditorRef.current) updateActiveNote({content:syncCheckboxesAndMarkdown(visualEditorRef.current)});},300); }}} placeholder="px"/>
+                          <input type="number" defaultValue={Math.round(selectedImage.offsetWidth)} min={50} max={1200} className="w-14 px-1.5 py-0.5 text-[11px] border rounded dark:bg-gray-700 dark:border-gray-600 outline-none text-center" onKeyDown={(e) => { if(e.key==='Enter') { const v = Math.max(50, parseInt(e.target.value)||300); selectedImage.style.width = v+'px'; selectedImage.setAttribute('data-width',v); setSelectedImage(null); if(contentSyncId.current) clearTimeout(contentSyncId.current); const expectedId = activeNoteIdRef.current; contentSyncId.current = setTimeout(()=>{if(visualEditorRef.current && visualEditorRef.current.getAttribute('data-note-id') === expectedId) updateActiveNote({content:syncCheckboxesAndMarkdown(visualEditorRef.current)});},300); }}} placeholder="px"/>
                           <button onMouseDown={(e)=>{e.preventDefault();setSelectedImage(null)}} className="text-gray-400 hover:text-red-500 ml-1"><X size={13}/></button>
                         </div>
                       );
                     })()}
                   </div>
                 ) : (
-                  <textarea id="note-editor-textarea" value={activeNote.content} onChange={(e)=>updateActiveNote({content:e.target.value})} style={{fontSize: activeNote.format==='md' ? '13px' : fontSizeMap[editorFontSize]}} className={`flex-1 w-full bg-transparent border-none outline-none resize-none leading-relaxed pb-32 min-h-[400px] dark:text-gray-200 ${activeNote.format==='md'?'font-mono':''}`}/>
+                  <textarea id="note-editor-textarea" value={(() => {
+                    // 优先使用切换时暂存的内容 ref，防止异步 state 导致显示旧内容
+                    if (pendingSourceContentRef.current !== null) {
+                      const v = pendingSourceContentRef.current;
+                      pendingSourceContentRef.current = null;
+                      return v;
+                    }
+                    return activeNote.content;
+                  })()} onChange={(e)=>updateActiveNote({content:e.target.value})} style={{fontSize: activeNote.format==='md' ? '13px' : fontSizeMap[editorFontSize]}} className={`flex-1 w-full bg-transparent border-none outline-none resize-none leading-relaxed pb-32 min-h-[400px] dark:text-gray-200 ${activeNote.format==='md'?'font-mono':''}`}/>
                 )}
                 {/* 反向链接面板 */}
                 {backlinks.length > 0 && (

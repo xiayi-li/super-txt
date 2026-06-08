@@ -7,7 +7,10 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "bundle:lite": "powershell -ExecutionPolicy Bypass -File scripts/build-lite.ps1",
+    "bundle:full": "powershell -ExecutionPolicy Bypass -File scripts/build-full.ps1",
+    "bundle:all": "powershell -ExecutionPolicy Bypass -File scripts/build-all.ps1"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.0",
