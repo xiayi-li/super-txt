@@ -4,7 +4,7 @@ import {
   ChevronDown, ChevronRight, ListChecks, Moon, Sun, X, Bold, Italic, 
   List, Eye, Code, FolderOpen, Link as LinkIcon, 
   FileOutput, ArrowRightLeft, Quote, FolderPlus, Library, Camera, CalendarDays, 
-  Clock, Maximize, Minimize, CornerRightUp, Palette, ListTree, RefreshCw
+  Clock, Maximize, Minimize, CornerRightUp, Palette, ListTree, RefreshCw, StickyNote
 } from 'lucide-react';
 
 // 稳健的 Tauri 检测，防止 window.__TAURI__ 部分定义时崩溃
@@ -152,7 +152,7 @@ const htmlToMarkdown = (html) => {
   md = md.replace(/<\/div>\s*<div[^>]*>/gi, '\n').replace(/<div[^>]*>/gi, '\n').replace(/<\/div>/gi, '');
   md = md.replace(/<p[^>]*>/gi, '').replace(/<\/p>/gi, '\n');
   // 颜色 span 保留（先匹配，后续不被 strip 掉）
-  md = md.replace(/<span\s+style\s*=\s*["']color:\s*(.*?)["'][^>]*>(.*?)<\/span>/gi, '§COLOR§$1§§$2§END§');
+  md = md.replace(/<span\s+style\s*=\s*["']color:\s*(.*?)["'][^>]*>([\s\S]*?)<\/span>/gi, '§COLOR§$1§§$2§END§');
   md = md.replace(/<font\s+color=["'](.*?)["'][^>]*>([\s\S]*?)<\/font>/gi, '§COLOR§$1§§$2§END§');
   md = md.replace(/<font\s+color=([\w#]+)[^>]*>([\s\S]*?)<\/font>/gi, '§COLOR§$1§§$2§END§');
   // 提取 DOM 预处理生成的 checkbox 索引占位符 span
@@ -224,16 +224,26 @@ const renderMarkdown = (rawText) => {
   // 围栏代码块
   text = text.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) =>
     `<pre style="background:#1e1e2e;color:#cdd6f4;padding:1rem;border-radius:8px;overflow-x:auto;margin:12px 0;font-size:13px;line-height:1.5;"><code>${code}</code></pre>`);
+  // 保护行内代码：提取为占位符，防止后续正则（粗体/斜体/wiki-link等）误匹配代码内容
+  const codeFragments = [];
+  text = text.replace(/`(.*?)`/gim, (_, code) => {
+    const idx = codeFragments.length;
+    codeFragments.push(code);
+    return `\x00ICODE${idx}\x00`;
+  });
   // 水平线
   text = text.replace(/^---$/gm, '<hr style="border:none;border-top:1px solid #e5e7eb;margin:1.5rem 0;"/>');
   // 标题
   text = text.replace(/^### (.*$)/gim, '<h3 data-heading="$1" style="font-size:1.125rem;font-weight:700;margin:1rem 0 0.5rem;">$1</h3>')
     .replace(/^## (.*$)/gim, '<h2 data-heading="$1" style="font-size:1.25rem;font-weight:700;margin:1.5rem 0 0.75rem;border-bottom:1px solid #e5e7eb;">$1</h2>')
     .replace(/^# (.*$)/gim, '<h1 data-heading="$1" style="font-size:1.875rem;font-weight:800;margin:1.5rem 0 1rem;">$1</h1>');
-  // 行内格式
+  // 行内格式（代码块已在占位符中保护，不会被误匹配）
   text = text.replace(/\*\*(.*?)\*\*/gim, '<strong>$1</strong>').replace(/\*(.*?)\*/gim, '<em>$1</em>');
   text = text.replace(/&lt;span style="color:(.*?)"&gt;(.*?)&lt;\/span&gt;/gim, '<span style="color:$1">$2</span>');
-  text = text.replace(/`(.*?)`/gim, '<code style="background-color:#f3f4f6;padding:2px 6px;border-radius:4px;color:#db2777;">$1</code>');
+  // 还原行内代码
+  codeFragments.forEach((code, idx) => {
+    text = text.split(`\x00ICODE${idx}\x00`).join(`<code style="background-color:#f3f4f6;padding:2px 6px;border-radius:4px;color:#db2777;">${code}</code>`);
+  });
   // 列表
   text = text.replace(/^- \[ \] (.*$)/gim, '<li style="list-style:none;"><input type="checkbox" style="margin-right:8px;"/> $1</li>')
     .replace(/^- \[(x|X)\] (.*$)/gim, '<li style="list-style:none;color:#9ca3af;text-decoration:line-through;"><input type="checkbox" checked style="margin-right:8px;"/> $2</li>')
@@ -279,6 +289,8 @@ function SuperTxtShell() {
 
   const [sidebarWidth, setSidebarWidth] = useState(240);
   const isResizing = useRef(false);
+  const [noteListWidth, setNoteListWidth] = useState(288);
+  const isResizingNoteList = useRef(false);
   const [zenMode, setZenMode] = useState(false);
 
   const [activeCategoryId, setActiveCategoryId] = useState(null);
@@ -337,6 +349,11 @@ function SuperTxtShell() {
   useEffect(() => { activeNoteIdRef.current = activeNoteId; }, [activeNoteId]);
   // 定期自动保存：追踪上次已存内容，避免重复写盘
   const lastAutoSavedRef = useRef({ id: null, content: '' });
+  // 延迟保存时读取最新 categories/workspacePath，避免闭包过期
+  const categoriesRef = useRef(categories);
+  useEffect(() => { categoriesRef.current = categories; }, [categories]);
+  const workspaceRef = useRef(workspacePath);
+  useEffect(() => { workspaceRef.current = workspacePath; }, [workspacePath]);
 
   const activeNote = useMemo(() => notes.find(n => n.id === activeNoteId), [notes, activeNoteId]);
   const docHeadings = useMemo(() => {
@@ -379,11 +396,13 @@ function SuperTxtShell() {
         const targetNote = notes.find(n => n.title === title);
         if (targetNote) { handleOpenNote(targetNote.id); }
         else {
-          if (!activeCategoryId || activeCategoryId === '__recent__') { showToast('⚠️ 请先在左侧选择一个目录', true); return; }
+          if (!activeCategoryId || activeCategoryId === '__recent__' || activeCategoryId === '__temp__') { showToast('⚠️ 请先在左侧选择一个目录', true); return; }
           const newNote = { id: `n${Date.now()}`, title, content: '', categoryId: activeCategoryId, tags: [], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), format: 'md', isPinned: false };
           setNotes(prev => [newNote, ...prev]);
           setOpenTabs(prev => Array.from(new Set([newNote.id, ...prev])));
           setActiveNoteId(newNote.id);
+          setShowVisualMode(true);
+          setRecentIds(prev => { if (prev.includes(newNote.id)) return prev; return [newNote.id, ...prev].slice(0, 100); });
           showToast(`📝 新建笔记：${title}`);
         }
       }
@@ -543,7 +562,7 @@ function SuperTxtShell() {
         if (lastAutoSavedRef.current.id === activeNoteId && lastAutoSavedRef.current.content === content) return;
         const note = notes.find(n => n.id === activeNoteId);
         if (!note) return;
-        const path = generatePath(note.categoryId, note.title, note.format, categories, workspacePath);
+        const path = generatePath(note.categoryId, note.title, note.format, categoriesRef.current, workspaceRef.current);
         invoke('save_local_file', { path, content }).catch(() => {});
         lastAutoSavedRef.current = { id: activeNoteId, content };
       } catch {}
@@ -593,7 +612,7 @@ function SuperTxtShell() {
           if (content !== null) {
             const note = notes.find(n => n.id === activeNoteId);
             if (note) {
-              const path = generatePath(note.categoryId, note.title, note.format, categories, workspacePath);
+              const path = generatePath(note.categoryId, note.title, note.format, categoriesRef.current, workspaceRef.current);
               invoke('save_local_file', { path, content }).catch(() => {});
             }
           }
@@ -608,10 +627,22 @@ function SuperTxtShell() {
     };
   }, [activeNoteId, showVisualMode, notes, categories, workspacePath]);
 
-  // 侧边栏拖拽
+  // 侧边栏 + 笔记列表拖拽
+  const sidebarWidthRef = useRef(240);
+  const noteListWidthRef = useRef(288);
+  useEffect(() => { sidebarWidthRef.current = sidebarWidth; }, [sidebarWidth]);
+  useEffect(() => { noteListWidthRef.current = noteListWidth; }, [noteListWidth]);
   useEffect(() => {
-    const handleMouseMove = (e) => { if (isResizing.current) setSidebarWidth(Math.max(160, Math.min(400, e.clientX))); };
-    const handleMouseUp = () => { isResizing.current = false; document.body.style.cursor = ''; document.body.style.userSelect = ''; };
+    const handleMouseMove = (e) => {
+      if (isResizing.current) setSidebarWidth(Math.max(160, Math.min(400, e.clientX)));
+      if (isResizingNoteList.current) setNoteListWidth(Math.max(180, Math.min(500, e.clientX - sidebarWidthRef.current)));
+    };
+    const handleMouseUp = () => {
+      if (isResizing.current) { isResizing.current = false; }
+      if (isResizingNoteList.current) { isResizingNoteList.current = false; }
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
     document.addEventListener('mousemove', handleMouseMove);
     document.addEventListener('mouseup', handleMouseUp);
     return () => { document.removeEventListener('mousemove', handleMouseMove); document.removeEventListener('mouseup', handleMouseUp); };
@@ -727,7 +758,8 @@ function SuperTxtShell() {
           saveTimeoutId.current = setTimeout(async () => {
             if (!isTauri) { setSaveStatus({ state: 'saved', time: new Date() }); return; }
             try {
-              const currentPath = generatePath(updatedNote.categoryId, updatedNote.title, updatedNote.format, categories, workspacePath);
+              // 使用 ref 读取最新 categories/workspacePath，防止闭包过期导致写到错误路径
+              const currentPath = generatePath(updatedNote.categoryId, updatedNote.title, updatedNote.format, categoriesRef.current, workspaceRef.current);
               await invoke('save_local_file', { path: currentPath, content: updatedNote.content || '' });
               setSaveStatus({ state: 'saved', time: new Date() });
             } catch (err) { showToast("❌ 文件保存失败", true); }
@@ -794,11 +826,22 @@ function SuperTxtShell() {
     let newTitle = '未命名笔记'; let counter = 1;
     while (notes.some(n => n.categoryId === targetCategoryId && n.title === newTitle)) { newTitle = `未命名笔记 (${counter})`; counter++; }
     const newNote = { id: `n${Date.now()}`, title: newTitle, content: '', categoryId: targetCategoryId, tags: [], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), format: 'txt', isPinned: false };
-    if(isTauri) invoke('save_local_file', { path: generatePath(newNote.categoryId, newNote.title, newNote.format, categories, workspacePath), content: '' });
-    setNotes([newNote, ...notes]);
-    let newTabs = Array.from(new Set([newNote.id, ...openTabs]));
-    if (newTabs.length > 10) newTabs = newTabs.slice(0, 10);
-    setOpenTabs(newTabs); setActiveNoteId(newNote.id); setShowVisualMode(false);
+    if(isTauri) invoke('save_local_file', { path: generatePath(newNote.categoryId, newNote.title, newNote.format, categories, workspacePath), content: '' }).catch(()=>{});
+    // functional setState 防并发覆盖 + 二次去重确保不会生成同名文件
+    setNotes(prev => {
+      let finalTitle = newNote.title;
+      if (prev.some(n => n.categoryId === targetCategoryId && n.title === finalTitle)) {
+        let c = 1;
+        while (prev.some(n => n.categoryId === targetCategoryId && n.title === `未命名笔记 (${c})`)) c++;
+        finalTitle = `未命名笔记 (${c})`;
+      }
+      return [{ ...newNote, title: finalTitle }, ...prev];
+    });
+    setOpenTabs(prev => {
+      const tabs = Array.from(new Set([newNote.id, ...prev]));
+      return tabs.length > 10 ? tabs.slice(0, 10) : tabs;
+    });
+    setActiveNoteId(newNote.id); setShowVisualMode(false);
     setTimeout(() => { const el = document.getElementById('note-title-input'); if (el) { el.focus(); el.select(); } }, 100);
   };
 
@@ -888,7 +931,15 @@ function SuperTxtShell() {
       try {
         await invoke('create_local_dir', { path: trashDir });
         await invoke('rename_local_item', { oldPath: srcPath, newPath: trashPath });
-      } catch (e) { /* 文件可能不存在 */ }
+      } catch (e) {
+        // 区分"文件不存在"（可安全清理 UI）和"权限/磁盘错误"（需阻止删除并提示）
+        const errMsg = (e?.message || String(e)).toLowerCase();
+        const isNotFound = errMsg.includes('not found') || errMsg.includes('os error 2') || errMsg.includes('找不到') || errMsg.includes('does not exist');
+        if (!isNotFound) {
+          showToast('❌ 移入回收站失败，请检查磁盘权限', true);
+          return; // 文件仍在原处，不从 UI 中移除
+        }
+      }
     }
     setNotes(prev => prev.filter(n => n.id !== note.id));
     setRecentIds(prev => prev.filter(id => id !== note.id));
@@ -928,13 +979,15 @@ function SuperTxtShell() {
       case 'quote': prefix = '\n> '; defaultText = '引用内容'; suffix = '\n'; break;
       case 'todo': { 
         const now = new Date(); const pad = n=>n.toString().padStart(2,'0');
-        prefix = '\n- [ ] '; defaultText = `待办事项 [创建 ${pad(now.getHours())}:${pad(now.getMinutes())}]`; suffix = '\n'; break;
+        const ts = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
+        prefix = '\n- [ ] '; defaultText = `待办事项 [创建 ${ts}]`; suffix = '\n'; break;
       }
       case 'todoTemplate': {
         const now = new Date();
         const pad = n=>n.toString().padStart(2,'0');
-        const timeStr = `[创建 ${pad(now.getHours())}:${pad(now.getMinutes())}]`;
-        prefix = `\n\n## 📅 ${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())} 待办\n- [ ]`;
+        const ts = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
+        const timeStr = `[创建 ${ts}]`;
+        prefix = `\n\n## 📅 ${ts} 待办\n- [ ] `;
         defaultText = `高优先级任务 ${timeStr}`; suffix = `\n- [ ] 常规任务 ${timeStr}\n`; break;
       }
       case 'timestamp': {
@@ -1025,14 +1078,15 @@ function SuperTxtShell() {
         case 'quote': document.execCommand('formatBlock', false, 'BLOCKQUOTE'); break;
         case 'todo': { 
           const now = new Date(); const pad = n=>n.toString().padStart(2,'0');
-          document.execCommand('insertHTML', false, `<ul><li style="list-style:none;"><input type="checkbox" style="margin-right:8px;"/> 待办事项 [创建 ${pad(now.getHours())}:${pad(now.getMinutes())}]</li></ul>`); break;
+          const ts = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
+          document.execCommand('insertHTML', false, `<ul><li style="list-style:none;"><input type="checkbox" style="margin-right:8px;"/> 待办事项 [创建 ${ts}]</li></ul>`); break;
         }
         case 'todoTemplate': {
           const now = new Date();
           const pad = n=>n.toString().padStart(2,'0');
-          const timeStr = `[创建 ${pad(now.getHours())}:${pad(now.getMinutes())}]`;
-          const dateStr = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())} `;
-          document.execCommand('insertHTML', false, `<br/><br/><h2>📅 ${dateStr} 待办</h2><ul><li style="list-style:none;"><input type="checkbox" style="margin-right:8px;"/> 高优先级任务 ${timeStr}</li><li style="list-style:none;"><input type="checkbox" style="margin-right:8px;"/> 常规任务 ${timeStr}</li></ul><br/>`);
+          const ts = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
+          const timeStr = `[创建 ${ts}]`;
+          document.execCommand('insertHTML', false, `<br/><br/><h2>📅 ${ts} 待办</h2><ul><li style="list-style:none;"><input type="checkbox" style="margin-right:8px;"/> 高优先级任务 ${timeStr}</li><li style="list-style:none;"><input type="checkbox" style="margin-right:8px;"/> 常规任务 ${timeStr}</li></ul><br/>`);
           break;
         }
         case 'timestamp': {
@@ -1084,9 +1138,11 @@ function SuperTxtShell() {
     try {
       showToast("📸 截图完成后将自动粘贴...");
       invoke('start_screenshot').catch(e => showToast("❌ 截图失败: " + (e?.message||e), true));
-      // 窗口重新获焦后自动读取剪贴板图片粘贴
+      // 窗口重新获焦后自动读取剪贴板图片粘贴；30秒超时自动清理防孤儿监听器
+      let fallbackTimer = null;
       const onFocus = async () => {
         window.removeEventListener('focus', onFocus);
+        if (fallbackTimer) { clearTimeout(fallbackTimer); fallbackTimer = null; }
         try {
           if (!navigator.clipboard?.read) return;
           const items = await navigator.clipboard.read();
@@ -1116,6 +1172,11 @@ function SuperTxtShell() {
         } catch (e) { console.log('[screenshot] auto-paste failed', e); }
       };
       window.addEventListener('focus', onFocus);
+      // 30 秒后自动移除，防止孤儿监听器
+      fallbackTimer = setTimeout(() => {
+        window.removeEventListener('focus', onFocus);
+        fallbackTimer = null;
+      }, 30000);
     } catch (e) { showToast("❌ 截图唤起失败", true); }
   };
 
@@ -1142,11 +1203,11 @@ function SuperTxtShell() {
       const childrenIds = getSubCategoryIds(item.id, categories);
       if (childrenIds.includes(targetId)) { showToast("⚠️ 不能移入子目录（防死锁）", true); return; }
       if (categories.some(c => c.parentId === targetId && c.name === item.name)) { showToast("⚠️ 同名目录拦截", true); return; }
-      setCategories(categories.map(c => c.id === item.id ? { ...c, parentId: targetId } : c)); showToast("✅ 已移动");
+      setCategories(prev => prev.map(c => c.id === item.id ? { ...c, parentId: targetId } : c)); showToast("✅ 已移动");
     } else {
       const item = moveDialog.item;
       if (notes.some(n => n.categoryId === targetId && n.title === item.title)) { showToast("⚠️ 同名文件拦截", true); return; }
-      setNotes(notes.map(n => n.id === item.id ? { ...n, categoryId: targetId } : n)); showToast("✅ 已移动");
+      setNotes(prev => prev.map(n => n.id === item.id ? { ...n, categoryId: targetId } : n)); showToast("✅ 已移动");
     }
     setMoveDialog(null);
   };
@@ -1378,11 +1439,30 @@ function SuperTxtShell() {
       {showSettingsModal && (
         <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-[200]">
           <div className="bg-white dark:bg-gray-800 w-[450px] flex flex-col rounded-xl shadow-2xl overflow-hidden border border-gray-200 dark:border-gray-700">
-            <div className="px-5 py-4 border-b border-gray-200 dark:border-gray-700 flex justify-between bg-gray-50 dark:bg-gray-900"><h3 className="font-semibold text-sm">⚙️ 工作区设置</h3><button onClick={()=>setShowSettingsModal(false)}><X size={16}/></button></div>
-            <div className="p-6 space-y-4">
-              <label className="block text-xs font-medium text-gray-500 mb-1">存储根目录路径</label>
-              <input value={tempWorkspacePath} onChange={e=>setTempWorkspacePath(e.target.value)} className="w-full px-3 py-2 border rounded-md text-sm font-mono dark:bg-gray-700 dark:border-gray-600" placeholder="D:\MyNotes" />
-              <p className="text-[11px] text-gray-400">修改后软件将热重载，从新路径加载数据</p>
+            <div className="px-5 py-4 border-b border-gray-200 dark:border-gray-700 flex justify-between bg-gray-50 dark:bg-gray-900"><h3 className="font-semibold text-sm">⚙️ 设置</h3><button onClick={()=>setShowSettingsModal(false)}><X size={16}/></button></div>
+            <div className="p-6 space-y-5">
+              <div>
+                <label className="block text-xs font-medium text-gray-500 mb-1">存储根目录路径</label>
+                <input value={tempWorkspacePath} onChange={e=>setTempWorkspacePath(e.target.value)} className="w-full px-3 py-2 border rounded-md text-sm font-mono dark:bg-gray-700 dark:border-gray-600" placeholder="D:\MyNotes" />
+                <p className="text-[11px] text-gray-400 mt-1">修改后软件将热重载，从新路径加载数据</p>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-500 mb-2">编辑器字体大小</label>
+                <div className="flex gap-2">
+                  {[
+                    { key: 'sm', label: '小', desc: '13px' },
+                    { key: 'md', label: '中', desc: '15px' },
+                    { key: 'lg', label: '大', desc: '17px' }
+                  ].map(opt => (
+                    <button key={opt.key}
+                      onClick={() => setEditorFontSize(opt.key)}
+                      className={`flex-1 py-2 px-3 rounded-md text-sm border transition-colors ${editorFontSize === opt.key ? 'bg-blue-600 text-white border-blue-600' : 'bg-white dark:bg-gray-700 border-gray-200 dark:border-gray-600 hover:border-blue-400'}`}>
+                      <div className="font-medium">{opt.label}</div>
+                      <div className={`text-[10px] ${editorFontSize === opt.key ? 'text-blue-100' : 'text-gray-400'}`}>{opt.desc}</div>
+                    </button>
+                  ))}
+                </div>
+              </div>
             </div>
             <div className="px-6 py-4 bg-gray-50 dark:bg-gray-900 flex justify-end space-x-3">
               <button onClick={()=>setShowSettingsModal(false)} className="px-4 py-2 bg-gray-100 dark:bg-gray-700 rounded-md text-sm">取消</button>
@@ -1448,6 +1528,9 @@ function SuperTxtShell() {
           <div onClick={()=>setActiveCategoryId('__recent__')} className={`flex items-center px-3 py-2 rounded-lg cursor-pointer text-sm font-medium transition-colors ${activeCategoryId==='__recent__'?'bg-blue-600 text-white':'text-gray-700 dark:text-gray-300 hover:bg-gray-200/60 dark:hover:bg-gray-700'}`}><Clock size={16} className="mr-2.5"/>最近访问
             <span className={`ml-auto text-[10px] px-1.5 rounded-full font-mono ${activeCategoryId==='__recent__'?'bg-white/20 text-white':'bg-gray-200/60 text-gray-500'}`}>{Array.from(new Set(recentIds)).filter(id => notes.some(n => n.id === id)).length}</span>
           </div>
+          <div onClick={()=>setActiveCategoryId('__temp__')} className={`flex items-center px-3 py-2 rounded-lg cursor-pointer text-sm font-medium transition-colors ${activeCategoryId==='__temp__'?'bg-orange-500 text-white':'text-orange-600 dark:text-orange-400 hover:bg-orange-50 dark:hover:bg-orange-900/30'}`}><StickyNote size={16} className="mr-2.5"/>临时笔记
+            <span className={`ml-auto text-[10px] px-1.5 rounded-full font-mono ${activeCategoryId==='__temp__'?'bg-white/20 text-white':'bg-orange-100 text-orange-600'}`}>{notes.filter(n => n.categoryId === '__temp__').length}</span>
+          </div>
           <div>
             <div className="text-xs font-semibold text-gray-400 dark:text-gray-500 mb-2 flex justify-between items-center px-1">
               <span>文件夹目录</span>
@@ -1476,7 +1559,7 @@ function SuperTxtShell() {
       </div>
 
       {/* ===== 2. 中间栏 - 笔记列表 ===== */}
-      <div className={`w-72 border-r flex flex-col shrink-0 relative ${zenMode?'w-0 hidden':''} ${theme==='dark'?'bg-gray-900/50 border-gray-700':'bg-[#fcfcfc] border-gray-200'}`}>
+      <div style={{ width: `${noteListWidth}px`, minWidth: '180px' }} className={`border-r flex flex-col shrink-0 relative transition-[width] ${zenMode?'w-0 hidden':''} ${theme==='dark'?'bg-gray-900/50 border-gray-700':'bg-[#fcfcfc] border-gray-200'}`}>
         <div className="p-3 border-b border-gray-200 dark:border-gray-700 space-y-3 shrink-0">
           <div className="relative"><Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400"/><input type="text" placeholder="搜索标题或内容..." value={searchQuery} onChange={e=>setSearchQuery(e.target.value)} className="w-full pl-8 pr-8 py-1.5 bg-gray-100 dark:bg-gray-800 rounded-md text-sm outline-none"/>{searchQuery && <button onClick={()=>setSearchQuery('')} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 p-0.5 rounded"><X size={14}/></button>}</div>
           <button onClick={handleCreateNote} disabled={!activeCategoryId || activeCategoryId === '__recent__'} title={!activeCategoryId || activeCategoryId === '__recent__' ? '请先在左侧目录树中选择一个目录' : '新建笔记'} className={`w-full flex items-center justify-center py-1.5 rounded-md text-sm transition-colors ${!activeCategoryId || activeCategoryId === '__recent__' ? 'bg-gray-300 text-gray-500 cursor-not-allowed' : 'bg-blue-600 text-white hover:bg-blue-700'}`}><Plus size={16} className="mr-1"/> 新建笔记</button>
@@ -1508,13 +1591,14 @@ function SuperTxtShell() {
           })}
           {filteredNotes.length===0 && <div className="text-center text-gray-400 text-sm py-12">暂无笔记</div>}
         </div>
+        {/* 拖拽手柄 */}
+        <div className="absolute top-0 right-0 w-1 h-full cursor-col-resize hover:bg-blue-400/50 z-10" onMouseDown={()=>{isResizingNoteList.current=true;document.body.style.cursor='col-resize';document.body.style.userSelect='none';}}></div>
       </div>
 
       {/* ===== 3. 右侧主区域 ===== */}
       <div className={`flex-1 flex flex-col min-w-0 relative ${theme==='dark'?'bg-[#0f0f0f]':'bg-white'}`}>
         {/* 标签栏 */}
-        {openTabs.length > 0 && (
-          <div className={`flex items-center border-b overflow-x-auto select-none pt-2 px-2 gap-1 custom-scrollbar shrink-0 relative ${theme==='dark'?'bg-gray-900 border-gray-700':'bg-[#f4f5f7] border-gray-200'}`}>
+        <div className={`flex items-center border-b overflow-x-auto select-none pt-2 px-2 gap-1 custom-scrollbar shrink-0 relative ${theme==='dark'?'bg-gray-900 border-gray-700':'bg-[#f4f5f7] border-gray-200'}`}>
             {Array.from(new Set(openTabs)).map(tabId => {
               const tabNote = notes.find(n=>n.id===tabId); if(!tabNote) return null;
               return (<div key={tabId} onClick={()=>setActiveNoteId(tabId)}
@@ -1523,8 +1607,33 @@ function SuperTxtShell() {
                 <span className="truncate flex-1 text-[11px] font-medium">{tabNote.title}</span><button onClick={(e)=>handleCloseTab(e,tabId)} className="ml-2 p-0.5 opacity-50 hover:opacity-100"><X size={12}/></button>
               </div>);
             })}
+            <button
+              onClick={() => {
+                const now = new Date();
+                const pad = n=>n.toString().padStart(2,'0');
+                const ts = `${pad(now.getMonth()+1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
+                const newNote = {
+                  id: `n${Date.now()}`,
+                  title: `临时_${ts}`,
+                  content: '',
+                  categoryId: '__temp__',
+                  tags: [],
+                  createdAt: new Date().toISOString(),
+                  updatedAt: new Date().toISOString(),
+                  format: 'md',
+                  isPinned: false
+                };
+                setNotes(prev => [newNote, ...prev]);
+                setOpenTabs(prev => Array.from(new Set([newNote.id, ...prev])));
+                setActiveNoteId(newNote.id);
+                setShowVisualMode(false);
+                setActiveCategoryId('__temp__');
+              }}
+              className="flex items-center px-2.5 py-1 rounded-md text-[11px] font-medium text-orange-500 hover:bg-orange-50 dark:hover:bg-orange-900/30 transition-colors shrink-0 ml-1"
+              title="新建临时笔记">
+              <Plus size={13} className="mr-1"/> 新建
+            </button>
           </div>
-        )}
         {/* 编辑器 */}
         {activeNote ? (<>
           <div className={`border-b px-4 flex flex-wrap items-center gap-2 py-2 shrink-0 z-10 ${theme==='dark'?'bg-[#0f0f0f] border-gray-700':'bg-white border-gray-200'}`}>
@@ -1642,7 +1751,7 @@ function SuperTxtShell() {
                 <input id="note-title-input" type="text" value={activeNote.title} onChange={(e)=>updateActiveNote({title:e.target.value})} placeholder="无标题笔记" className="text-2xl font-bold bg-transparent border-none outline-none mb-2 w-full dark:text-gray-100"/>
                 <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-gray-400 mb-3 font-mono">
                   <span className="font-bold text-green-500 text-[11px]">
-                    {saveStatus.time ? `已保存 ${formatDate(saveStatus.time.toISOString())}` : '未保存'}
+                    {saveStatus.time ? (() => { const d = saveStatus.time; const pad = n => n.toString().padStart(2,'0'); const ts = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`; return `已保存 ${ts}`; })() : '未保存'}
                   </span>
                   <span>创建 {formatDate(activeNote.createdAt)}</span>
                   <span>修改 {formatDate(activeNote.updatedAt)}</span>
@@ -1734,10 +1843,11 @@ function SuperTxtShell() {
                             if (textNode) {
                               let text = textNode.textContent;
                               // 移除已有的完成时间标记
-                              text = text.replace(/\s*\[完成\s+\d{2}:\d{2}\]\s*$/, '');
+                              text = text.replace(/\s*\[完成\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\]\s*$/, '');
                               if (cb.checked) {
                                 const now = new Date(); const pad = n=>n.toString().padStart(2,'0');
-                                text = text.trimEnd() + ` [完成 ${pad(now.getHours())}:${pad(now.getMinutes())}]`;
+                                const ts = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
+                                text = text.trimEnd() + ` [完成 ${ts}]`;
                               }
                               textNode.textContent = text;
                             }
@@ -1791,7 +1901,7 @@ function SuperTxtShell() {
                       return v;
                     }
                     return activeNote.content;
-                  })()} onChange={(e)=>updateActiveNote({content:e.target.value})} style={{fontSize: activeNote.format==='md' ? '13px' : fontSizeMap[editorFontSize]}} className={`flex-1 w-full bg-transparent border-none outline-none resize-none leading-relaxed pb-32 min-h-[400px] dark:text-gray-200 ${activeNote.format==='md'?'font-mono':''}`}/>
+                  })()} onChange={(e)=>updateActiveNote({content:e.target.value})} style={{fontSize: fontSizeMap[editorFontSize]}} className={`flex-1 w-full bg-transparent border-none outline-none resize-none leading-relaxed pb-32 min-h-[400px] dark:text-gray-200 ${activeNote.format==='md'?'font-mono':''}`}/>
                 )}
                 {/* 反向链接面板 */}
                 {backlinks.length > 0 && (

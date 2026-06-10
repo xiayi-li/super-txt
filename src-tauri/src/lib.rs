@@ -80,9 +80,18 @@ fn open_folder(path: String) -> Result<(), String> {
     let p = PathBuf::from(&path);
     #[cfg(target_os = "windows")]
     {
-        // 如果是文件，使用 /select, 在 explorer 中高亮；否则直接打开目录
-        let arg = if p.is_file() { format!("/select,{}", path) } else { path.clone() };
-        Command::new("explorer").arg(arg).spawn().map_err(|e| format!("explorer 启动失败: {}", e))?;
+        use std::os::windows::process::CommandExt;
+        // 如果文件存在或是其父目录存在（临时笔记未存盘也能定位到目录），使用 /select, 高亮文件
+        let use_select = p.is_file() || (p.parent().map(|par| par.exists()).unwrap_or(false));
+        if use_select {
+            Command::new("explorer")
+                .raw_arg(format!("/select,\"{}\"", path))
+                .spawn()
+                .map_err(|e| format!("explorer 启动失败: {}", e))?;
+        } else {
+            // 连父目录都不存在时，打开工作区根目录
+            Command::new("explorer").arg(&path).spawn().map_err(|e| format!("explorer 启动失败: {}", e))?;
+        }
         return Ok(());
     }
     #[cfg(not(target_os = "windows"))]
@@ -119,7 +128,7 @@ fn scan_workspace(workspace_path: String) -> Result<String, String> {
         return Err(format!("工作空间目录不存在: {}", workspace_path));
     }
 
-    let skip_dirs = ["\\.trash", "\\.assets", "\\.git", "\\node_modules", "\\target", "\\gen"];
+    let skip_dirs = [".trash", ".assets", ".git", "node_modules", "target", "gen"];
     let mut results: Vec<FileEntry> = Vec::new();
 
     fn walk(dir: &Path, workspace: &Path, skip_dirs: &[&str], results: &mut Vec<FileEntry>) -> Result<(), String> {
@@ -127,9 +136,10 @@ fn scan_workspace(workspace_path: String) -> Result<String, String> {
         for ent in entries.flatten() {
             let path = ent.path();
             let path_str = path.to_string_lossy().to_string();
-            // 跳过特殊目录
+            // 跳过特殊目录（精确匹配目录名，避免子串误伤）
             if path.is_dir() {
-                if skip_dirs.iter().any(|s| path_str.contains(*s) || path_str.ends_with(s.replace('\\', "").as_str())) {
+                let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if skip_dirs.iter().any(|s| dir_name == *s) {
                     continue;
                 }
                 walk(&path, workspace, skip_dirs, results)?;
