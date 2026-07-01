@@ -1,6 +1,6 @@
 [package]
 name = "super-txt"
-version = "0.1.0"
+version = "0.2.0"
 description = "SuperTxt - 本地优先的 TXT/Markdown 双模笔记工具"
 authors = ["you"]
 edition = "2021"

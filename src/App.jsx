@@ -965,7 +965,7 @@ function SuperTxtShell() {
     const textarea = document.getElementById('note-editor-textarea');
     const start = textarea ? textarea.selectionStart : (activeNote.content || '').length;
     const end = textarea ? textarea.selectionEnd : start;
-    const text = activeNote.content || '';
+    const text = textarea ? textarea.value : (activeNote.content || '');
     const selection = text.substring(start, end);
     let prefix = '', suffix = '', defaultText = '文本';
     switch (action) {
@@ -1182,7 +1182,13 @@ function SuperTxtShell() {
 
   const handleExtractPlainText = () => {
     if (!activeNote) return;
-    const raw = showVisualMode && visualEditorRef.current ? visualEditorRef.current.innerText : stripMarkdown(activeNote.content);
+    let raw;
+    if (showVisualMode && visualEditorRef.current) {
+      raw = visualEditorRef.current.innerText;
+    } else {
+      const textarea = document.getElementById('note-editor-textarea');
+      raw = stripMarkdown(textarea ? textarea.value : (activeNote.content || ''));
+    }
     setTempTextContent(raw.replace(/\n{3,}/g, '\n\n').trim());
     setShowTempTextModal(true);
   };
@@ -1190,7 +1196,9 @@ function SuperTxtShell() {
   const handleConvertToTxtPermanent = () => {
     if (!activeNote) return;
     requestConfirm("转换为TXT将丢失所有排版，确认继续？", () => {
-      updateActiveNote({ format: 'txt', content: stripMarkdown(activeNote.content) });
+      const textarea = document.getElementById('note-editor-textarea');
+      const content = textarea ? textarea.value : (activeNote.content || '');
+      updateActiveNote({ format: 'txt', content: stripMarkdown(content) });
       setShowVisualMode(false);
     });
   };
